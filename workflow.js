@@ -193,7 +193,9 @@ export function localFindings(pages) {
     }
   }
   for (const id of ids) {
-    if (!inbound.has(id)) findings.push({ code: 'ORPHAN', id })
+    // 来源页是材料入口，没有别的页指向它是正常的。
+    if (id.startsWith('source/')) continue
+    if (!inbound.has(id)) findings.push({ code: 'ORPHAN', id, message: '无其他页引用' })
   }
   return findings
 }

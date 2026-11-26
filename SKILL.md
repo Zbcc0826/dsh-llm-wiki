@@ -9,7 +9,7 @@ description: 把材料维护成持续更新的知识维基。摄入、提问和�
 
 `wiki_query` 先取证再回答：词面、本地向量、两跳链接和矛盾的另一面都进证据，然后只根据这些证据作答。只有用户要求把答案留下时，`file` 才传 true。冲突的两边都要保留。向量模型是开源的 multilingual-e5-small，不调用 DeepSeek 的向量接口。
 
-`wiki_lint` 先看报告。要改页面时才把 `apply` 设为 true。它不能新建页面，也不能删掉已有依据。
+`wiki_lint` 先看报告。来源页是材料入口，没有别的页指向它不算孤立。要改页面时才把 `apply` 设为 true。它不能新建页面，也不能删掉已有依据。
 
 `wiki_read` 按 `种类/slug` 读一页。`wiki_status` 看页数和最近日志。`wiki_parsers` 看现在能解析什么。返回 `NO_PARSER` 时说明这个类型还没有解析器，不要假装已经读过。
 

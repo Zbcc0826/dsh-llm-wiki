@@ -215,7 +215,7 @@ test('体检默认只报告，apply 不能新建页面', async () => {
   })
   const report = await lint({ root, complete: async () => ({ ok: false, code: 'SHOULD_NOT_CALL' }) })
   assert.equal(report.applied, false)
-  assert.equal(report.findings.some((item) => item.code === 'ORPHAN' && item.id === 'source/river'), true)
+  assert.equal(report.findings.some((item) => item.code === 'ORPHAN'), false)
   const created = await lint({
     root,
     apply: true,
@@ -1022,4 +1022,7 @@ test('本地检查能看见断链', () => {
   }])
   assert.equal(findings.some((item) => item.code === 'PARTIAL'), true)
   assert.equal(findings.some((item) => item.code === 'BROKEN_LINK'), true)
+  assert.equal(findings.some((item) => item.code === 'ORPHAN' && item.id === 'entity/li' && item.message === '无其他页引用'), true)
+  const roots = localFindings([{ kind: 'source', slug: 'river', body: '河向东。' }])
+  assert.equal(roots.some((item) => item.code === 'ORPHAN'), false)
 })
