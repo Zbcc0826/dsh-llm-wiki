@@ -338,12 +338,49 @@ test('页面头可以写回，slug 和路径穿越不能进补丁', () => {
   assert.equal(page.ok, true)
   assert.equal(page.title, '李')
   assert.deepEqual(page.sources, ['a'.repeat(64)])
-  const bad = validateIngest({
+  const rewritten = validateIngest({
     summary: 'x',
     pages: [{ kind: 'entity', slug: '../raw', title: '坏', summary: '坏', body: '坏', sources: ['a'.repeat(64)] }],
   }, { hash: 'a'.repeat(64), existing: new Map() })
-  assert.equal(bad.ok, false)
-  assert.equal(bad.code, 'BAD_PATCH')
+  assert.equal(rewritten.ok, true)
+  assert.equal(rewritten.pages[0].slug, 'huai')
+  assert.equal(rewritten.pages[0].slug.includes('/'), false)
+  const blind = validateIngest({
+    summary: 'x',
+    pages: [{ kind: 'entity', slug: '***', title: '***', summary: '坏', body: '坏', sources: ['a'.repeat(64)] }],
+  }, { hash: 'a'.repeat(64), existing: new Map() })
+  assert.equal(blind.code, 'BAD_PATCH')
+  assert.equal(blind.field, 'slug')
+  assert.equal(blind.value, '***')
+  assert.equal(blind.rule, '^[a-z0-9]+(?:-[a-z0-9]+)*$')
+})
+
+test('非法 slug 按标题转写，BAD_PATCH 带回值和规则', async () => {
+  const hash = 'b'.repeat(64)
+  const pages = [
+    { kind: 'entity', slug: '星桥科技', title: '星桥科技', summary: '公司', body: '做光学。', sources: [hash] },
+    { kind: 'entity', slug: 'Northwind Logistics', title: 'Northwind Logistics', summary: '客户', body: '在北方。', sources: [hash] },
+    { kind: 'event', slug: '成立年份', title: '成立年份', summary: '年份', body: '二零一九。', sources: [hash] },
+  ]
+  const checked = validateIngest({ summary: '三份', pages }, { hash, existing: new Map() })
+  assert.equal(checked.ok, true)
+  assert.deepEqual(checked.pages.map((page) => page.slug), ['xing-qiao-ke-ji', 'northwind-logistics', 'cheng-li-nian-fen'])
+  const root = tempWiki()
+  const failed = await ingest({
+    root,
+    input: { text: '# 河\n\n向东', title: '河' },
+    now: () => new Date('2026-11-25T00:00:00.000Z'),
+    complete: async () => ({
+      ok: true,
+      model: 'deepseek-flash',
+      text: JSON.stringify({ summary: '缺摘要', pages: [{ kind: 'source', slug: 'river', title: '河', summary: '', body: '向东', sources: [hash] }] }),
+    }),
+    approve: async () => 'allowed-once',
+  })
+  assert.equal(failed.field, 'summary')
+  assert.equal(failed.value, '')
+  assert.match(readFileSync(path.join(root, 'log.md'), 'utf8'), /失败 BAD_PATCH summary= rule=1到200字/)
+  rmSync(root, { recursive: true, force: true })
 })
 
 test('摄入在批准后写页面和日志，拒绝或坏补丁不落盘', async () => {

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "LLM Wiki",
-    "description": "Maintain sources as a persistent wiki. Raw files stay unchanged, and writes wait for approval."
+    "description": "Built from Karpathy's LLM Wiki gist. Try it, and let your own agent take part."
   }
 }

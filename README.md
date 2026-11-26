@@ -1,10 +1,12 @@
 # LLM Wiki
 
-DeepSeek Harness plugin that keeps a persistent wiki between you and the raw sources, following the [llm-wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) pattern. Raw files are copied once and never rewritten. Pages are updated only from a validated patch after approval. Full English guide: [README.en.md](README.en.md).
+DeepSeek Harness plugin built from [Andrej Karpathy's LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Raw files are copied once and never rewritten. Pages are updated only from a validated patch after approval. Try it, and let your own agent take part. Full English guide: [README.en.md](README.en.md).
 
 # LLM Wiki
 
-把零散材料维护成一份会累积的知识维基，而不是每次提问都重新翻原文。依据是 [llm-wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)。
+这个插件从 [Andrej Karpathy 在 GitHub 上发布的 LLM Wiki 说明](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 出发实现。它把零散材料维护成一份会累积的知识维基，而不是每次提问都重新翻原文。
+
+欢迎试用，也欢迎让你自己的 agent 参与这个项目：用它摄入、提问、改进页面，或把使用中的问题带回仓库 [Zbcc0826/dsh-llm-wiki](https://github.com/Zbcc0826/dsh-llm-wiki)。
 
 这是一个本地插件，不需要发布到 npm。克隆后在你自己的机器上运行安装脚本即可。桌面应用和命令行共用一份配置。包名是 `dsh-llm-wiki`。
 

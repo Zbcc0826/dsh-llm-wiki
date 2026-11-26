@@ -155,7 +155,7 @@ async function draftPatch(options, messages, hash, existing, prepare) {
   )
   let checked = check(drafted.value)
   if (!checked.ok && checked.code === 'BAD_PATCH') {
-    drafted = await askModel(options.complete, repairMessages(messages, checked.message || 'BAD_PATCH', hash))
+    drafted = await askModel(options.complete, repairMessages(messages, checked, hash))
     if (!drafted.ok) return drafted
     checked = check(drafted.value)
   }
@@ -380,7 +380,10 @@ async function askModel(complete, messages) {
   const result = await complete(messages)
   if (!result?.ok) return result ?? { ok: false, code: 'NO_MODEL' }
   const value = extractJson(result.text)
-  if (!value) return { ok: false, code: 'BAD_PATCH', message: String(result.text ?? '').slice(0, 400) }
+  if (!value) {
+    const text = String(result.text ?? '').slice(0, 180)
+    return { ok: false, code: 'BAD_PATCH', field: 'json', value: text, rule: '一个 JSON 对象', message: text }
+  }
   return { ok: true, value, model: result.model }
 }
 
@@ -402,11 +405,14 @@ function observe(result) {
 function failAttempt(options, title, result) {
   const now = options.now?.() ?? new Date()
   const message = typeof result.message === 'string' ? result.message.slice(0, 200) : ''
+  const detail = result.field
+    ? `失败 ${result.code ?? 'FAILED'} ${result.field}=${result.value ?? ''} rule=${result.rule ?? ''}`
+    : `失败 ${result.code ?? 'FAILED'}${message ? ` ${message}` : ''}`
   appendLog(options.root, {
     date: day(now),
     op: 'ingest',
     title,
-    detail: `失败 ${result.code ?? 'FAILED'}${message ? ` ${message}` : ''}`,
+    detail,
   })
   return observe(result)
 }
@@ -466,11 +472,14 @@ function readSchema(root) {
 
 /** 第一次补丁缺字段时，把缺什么和必须带上的哈希再交给模型一次。 */
 function repairMessages(messages, reason, hash) {
+  const detail = reason && typeof reason === 'object'
+    ? `${reason.field ?? reason.message ?? 'BAD_PATCH'}=${reason.value ?? ''} rule=${reason.rule ?? ''}`
+    : String(reason || 'BAD_PATCH')
   return [
     ...messages,
     {
       role: 'user',
-      content: `上一份补丁不合格：${reason}。每页必须有 summary（1到200字）和 body。sources 必须包含 ${hash}。relations 每条写成「谓语 目标页」。不要写 query 页。只返回一个 JSON 对象。`,
+      content: `上一份补丁不合格：${detail}。每页必须有 summary（1到200字）和 body。sources 必须包含 ${hash}。relations 每条写成「谓语 目标页」。slug 必须匹配 ^[a-z0-9]+(?:-[a-z0-9]+)*$。不要写 query 页。只返回一个 JSON 对象。`,
     },
   ]
 }

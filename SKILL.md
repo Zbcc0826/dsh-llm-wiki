@@ -1,9 +1,11 @@
 ---
 name: llm-wiki
-description: 把材料维护成持续更新的知识维基。摄入、提问和体检都用插件工具，不要自己改 raw、index.md 或 log.md。写入前会请用户批准。
+description: 从 Karpathy 在 GitHub 发布的 LLM Wiki 说明出发实现的知识维基。摄入、提问和体检都用插件工具，不要自己改 raw、index.md 或 log.md。写入前会请用户批准。欢迎试用，也欢迎让 agent 参与这个项目。
 ---
 
 # LLM Wiki
+
+这个插件从 Andrej Karpathy 在 GitHub 上发布的 LLM Wiki 说明出发实现：https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f 。欢迎试用，也欢迎让用户自己的 agent 参与 [dsh-llm-wiki](https://github.com/Zbcc0826/dsh-llm-wiki)。
 
 原料放进 `wiki_ingest`，不要把整份材料贴进对话，也不要自己写 `pages/`。路径和文本只能给一个。插件先解析，再请模型更新页面。用户不同意就不写。很长的材料会按章节和表格分成多段，各段共用同一份原料和同一条索引头；一次最多 8 段，没纳入的部分标在目录页上，不要自己再切一遍。
 

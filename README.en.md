@@ -1,6 +1,8 @@
 # LLM Wiki
 
-A DeepSeek Harness plugin that keeps a persistent wiki between you and the raw sources, following the [llm-wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) pattern. Raw files are copied once and never rewritten. Pages, the index, and the log are updated only from a validated patch after approval.
+A DeepSeek Harness plugin built from [Andrej Karpathy's LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). It keeps a persistent wiki between you and the raw sources. Raw files are copied once and never rewritten. Pages, the index, and the log are updated only from a validated patch after approval.
+
+Try it, and let your own agent take part: ingest sources, ask questions, improve pages, or bring what you find back to [Zbcc0826/dsh-llm-wiki](https://github.com/Zbcc0826/dsh-llm-wiki).
 
 This is a local plugin and is not published to npm. Clone the repo and run the install script on your machine. The desktop app and the CLI share one configuration. The package name is `dsh-llm-wiki`.
 

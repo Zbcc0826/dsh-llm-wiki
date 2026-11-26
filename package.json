@@ -1,7 +1,7 @@
 {
   "name": "dsh-llm-wiki",
-  "version": "0.4.0",
-  "description": "把材料维护成持续更新的知识维基。原料只读，写入前征求同意。",
+  "version": "0.4.1",
+  "description": "从 Karpathy 在 GitHub 发布的 LLM Wiki 说明出发实现。欢迎试用，也欢迎让自己的 agent 参与。",
   "type": "module",
   "private": true,
   "icon": "./icon.svg",
@@ -30,6 +30,7 @@
     "retrieve.js",
     "workflow.js",
     "graph.js",
+    "slug.js",
     "SKILL.md",
     "install.mjs",
     "README.md",
@@ -48,6 +49,7 @@
     "@deepseek-ai/dsh-tools": "0.2.2-rc.3"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.3.2"
+    "@huggingface/transformers": "^4.3.2",
+    "pinyin-pro": "^3.27.0"
   }
 }
