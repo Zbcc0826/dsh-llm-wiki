@@ -1,0 +1,4 @@
+# 插件页的总开关控制这一项。
+- insert:
+    - id: llm-wiki
+      name: dsh-llm-wiki

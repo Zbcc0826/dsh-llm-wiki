@@ -1,0 +1,57 @@
+# LLM Wiki
+
+A DeepSeek Harness plugin that keeps a persistent wiki between you and the raw sources, following the [llm-wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) pattern. Raw files are copied once and never rewritten. Pages, the index, and the log are updated only from a validated patch after approval.
+
+This is a local plugin and is not published to npm. Clone the repo and run the install script on your machine. The desktop app and the CLI share one configuration. The package name is `dsh-llm-wiki`.
+
+## Requirements
+
+- DeepSeek Harness `0.2.2-rc.3` or newer, and below `0.3.0`
+- A working `dsh` CLI or desktop app
+- The desktop app already includes the pnpm used to install plugins
+- `DEEPSEEK_API_KEY`, or `DEEPSEEK_KEY_FILE` pointing at a key file, when a model call is needed
+
+## Install
+
+Open **Plugins**, click the arrow next to **Add plugin**, and choose **Install a third-party plugin**. For a local clone, enter this repo's absolute path. From GitHub, enter:
+
+```text
+github:Zbcc0826/dsh-llm-wiki
+```
+
+Choose **Enable now** when installation finishes. The card appears under **Installed** in **Experimental**, titled LLM Wiki, with a switch on the right. Turning the switch off unloads the `dsh-llm-wiki` bundle.
+
+You can also run this in the repo:
+
+```sh
+node install.mjs
+```
+
+The script installs into every existing profile under `DSH_HOME` (default `~/.dsh`) and turns the switch on. The desktop profile cannot be managed with `dsh plugin --profile desktop`, so the script edits that directory directly. Restart a running desktop app afterward. A local-path install also vendors `@deepseek-ai/dsh-tools` into `.dsh-deps`, because a directory outside the repo will not fall back to the copy inside the app. Do not commit `.dsh-deps` or `node_modules`.
+
+To remove it, turn the card off, then uninstall. Do not write an absolute path into `$DSH_HOME/cordis.patch.yml`. That insert does not show up on the plugin page and the switch cannot turn it off.
+
+## What you get
+
+Sources land in `raw/` and stay unchanged. Pages live in `pages/`. The plugin writes `index.md` and `log.md`. `schema.md` is written once and then left alone. The wiki lives at `$DSH_HOME/llm-wiki` unless `LLM_WIKI_ROOT` is set.
+
+A question starts at the catalog cards: title, aliases, and one claim. An alias match outranks a passing mention in a body. The plugin then opens a few pages, follows one `[[link]]`, and keeps the other side of a contradiction. When the question and the page share no words, local multilingual-e5-small vectors fill the gap. When neither the catalog nor the words pull ahead, it tries headings a reader would look up. Reranking sees the evidence sentence, not the start of the page. At most ten pieces of evidence are returned, and the answer has to come from those pieces.
+
+- `wiki_ingest` parses one source and updates the pages that should mention it. Pass either a path or text, not both. Nothing is written before approval. Aliases are the words a later reader would search.
+- `wiki_query` retrieves evidence, then answers. It does not read raw files. The answer is filed only when `file` is true.
+- `wiki_lint` reports broken links, orphan pages, and incomplete sources. `apply` edits existing pages only. It cannot create a page or drop a source.
+- `wiki_read`, `wiki_status`, and `wiki_parsers` are read-only.
+
+If there is no approval UI, a write returns `NOT_APPROVED` and does not hang.
+
+## Parsers
+
+`createRegistry` accepts extra parsers ahead of the built-in image, markdown, text, JSON, CSV, and HTML parsers. Image parsers keep pixels and do not invent OCR text. `presentSource` is what the model is allowed to see, including up to four images. Unknown types return `NO_PARSER`.
+
+The first query downloads the embedding weights into the plugin `.cache` directory. If that download fails, retrieval continues with words, the catalog, and links.
+
+Model calls use `deepseek-v4-flash`. The literal id `dsv4.1flash` is rejected, and the response usually reports `deepseek-flash`.
+
+## Keys
+
+Do not commit API keys. The plugin reads `DEEPSEEK_API_KEY`, or the file named by `DEEPSEEK_KEY_FILE`.

@@ -1,0 +1,50 @@
+{
+  "name": "dsh-llm-wiki",
+  "version": "0.4.0",
+  "description": "把材料维护成持续更新的知识维基。原料只读，写入前征求同意。",
+  "type": "module",
+  "private": true,
+  "icon": "./icon.svg",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./parsers": "./parsers.js",
+    "./present": "./present.js",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale",
+    "index.js",
+    "parsers.js",
+    "present.js",
+    "pages.js",
+    "store.js",
+    "patch.js",
+    "llm.js",
+    "embed.js",
+    "retrieve.js",
+    "workflow.js",
+    "SKILL.md",
+    "install.mjs",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "dsh": ">=0.2.2-rc.3 <0.3.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.3"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.2"
+  }
+}
