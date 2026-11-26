@@ -37,9 +37,10 @@ Sources land in `raw/` and stay unchanged. Pages live in `pages/`. The plugin wr
 
 A question starts at the catalog cards: title, aliases, and one claim. An alias match outranks a passing mention in a body. The plugin then opens a few pages, follows one `[[link]]`, and keeps the other side of a contradiction. When the question and the page share no words, local multilingual-e5-small vectors fill the gap. When neither the catalog nor the words pull ahead, it tries headings a reader would look up. Reranking sees the evidence sentence, not the start of the page. At most ten pieces of evidence are returned, and the answer has to come from those pieces.
 
-- `wiki_ingest` parses one source and updates the pages that should mention it. Pass either a path or text, not both. Nothing is written before approval. Aliases are the words a later reader would search.
-- `wiki_query` retrieves evidence, then answers. It does not read raw files. The answer is filed only when `file` is true.
-- `wiki_lint` reports broken links, orphan pages, and incomplete sources. `apply` edits existing pages only. It cannot create a page or drop a source.
+- `wiki_ingest` parses one source and updates the pages that should mention it. Pass either a path or text, not both. Nothing is written before approval. Aliases are the words a later reader would search. Text longer than one page is split on headings and tables. Every part keeps the same raw hash and the same index heading, and a table stays with its header. At most 8 parts are filed; the index page marks anything left unread.
+- `wiki_query` retrieves evidence, then answers. It does not read raw files. The answer is filed only when `file` is true. Retrieval also follows `relations`.
+- `wiki_graph` walks entity, event, and relation edges without a model. `hops` is 0 to 4. `predicate` keeps one relation type.
+- `wiki_lint` reports broken links, orphan pages, missing relations, and incomplete sources. `apply` edits existing pages only. It cannot create a page or drop a source.
 - `wiki_read`, `wiki_status`, and `wiki_parsers` are read-only.
 
 If there is no approval UI, a write returns `NOT_APPROVED` and does not hang.
@@ -47,6 +48,10 @@ If there is no approval UI, a write returns `NOT_APPROVED` and does not hang.
 ## Parsers
 
 `createRegistry` accepts extra parsers ahead of the built-in image, markdown, text, JSON, CSV, and HTML parsers. Image parsers keep pixels and do not invent OCR text. `presentSource` is what the model is allowed to see, including up to four images. Unknown types return `NO_PARSER`.
+
+PDF, Word, Excel, PowerPoint, audio, and video are not parsed here. Those paths return `NEED_EXTERNAL_PARSER`. Another plugin can inject the `llm-wiki.parsers` service and call `register` or `accept`, or pass the finished document as the `parsed` argument to `wiki_ingest`. Parts use `text`, `table`, `caption`, `transcript`, or `image`, with a `locator` for a page, slide, or timestamp. Original bytes go in `source.base64`. A locator stays with the table that follows it.
+
+Events are `event` pages. Each `relations` entry is `predicate kind/slug`, for example `works-for entity/acme`. An update must keep relations that were already there. `wiki_graph` walks those edges in both directions.
 
 The first query downloads the embedding weights into the plugin `.cache` directory. If that download fails, retrieval continues with words, the catalog, and links.
 

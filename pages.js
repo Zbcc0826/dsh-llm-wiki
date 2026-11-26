@@ -4,16 +4,26 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-export const KINDS = ['source', 'entity', 'concept', 'query']
+export const KINDS = ['source', 'entity', 'event', 'concept', 'query']
 const KIND_SET = new Set(KINDS)
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const KIND_PATTERN = KINDS.join('|')
+
+/** 页标识，例如 entity/acme 或 event/claim。 */
+export const PAGE_ID = new RegExp(`^(${KIND_PATTERN})/[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+/** 正文里的 [[种类/slug]]。 */
+export function linksIn(body) {
+  const pattern = new RegExp(`\\[\\[(${KIND_PATTERN})/([a-z0-9]+(?:-[a-z0-9]+)*)\\]\\]`, 'g')
+  return [...String(body ?? '').matchAll(pattern)].map((match) => `${match[1]}/${match[2]}`)
+}
 
 /** slug 只能是小写、数字和单个连字符。 */
 export function validSlug(slug) {
   return typeof slug === 'string' && slug.length >= 1 && slug.length <= 60 && SLUG.test(slug)
 }
 
-/** 种类必须是四类之一。 */
+/** 种类必须是来源、实体、事件、概念或提问。 */
 export function validKind(kind) {
   return KIND_SET.has(kind)
 }
@@ -32,10 +42,12 @@ export function serializePage(page) {
     `title: ${JSON.stringify(page.title ?? '')}`,
     `summary: ${JSON.stringify(page.summary ?? '')}`,
     `partial: ${page.partial === true ? 'true' : 'false'}`,
+    ...(page.locator ? [`locator: ${JSON.stringify(page.locator)}`] : []),
     `updated: ${JSON.stringify(page.updated ?? '')}`,
     listField('sources', page.sources),
     listField('cites', page.cites),
     listField('contradicts', page.contradicts),
+    listField('relations', page.relations),
     listField('aliases', page.aliases),
     listField('claims', page.claims),
     '---',
@@ -84,10 +96,12 @@ export function parsePage(markdown) {
     title: String(meta.title ?? ''),
     summary: String(meta.summary ?? ''),
     partial: meta.partial === true,
+    locator: meta.locator ? String(meta.locator) : '',
     updated: String(meta.updated ?? ''),
     sources: asList(meta.sources),
     cites: asList(meta.cites),
     contradicts: asList(meta.contradicts),
+    relations: asList(meta.relations),
     aliases: asList(meta.aliases),
     claims: asList(meta.claims),
     body: match[2].replace(/^\n/, '').replace(/\n$/, ''),

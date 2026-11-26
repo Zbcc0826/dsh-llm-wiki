@@ -2,10 +2,11 @@
  * 校验模型交回的补丁。通过之后才允许写盘。
  */
 import { appendLog, rebuildIndex } from './store.js'
-import { pageId, validKind, validSlug, writePage } from './pages.js'
+import { parseRelation } from './graph.js'
+import { PAGE_ID, pageId, validKind, validSlug, writePage } from './pages.js'
 
 const HASH = /^[a-f0-9]{64}$/
-const CITE = /^(source|entity|concept|query)\/[a-z0-9]+(?:-[a-z0-9]+)*$/
+const CITE = PAGE_ID
 
 /**
  * 检查摄入补丁。已有页必须声明 update，并且保留原来的来源哈希。
@@ -29,6 +30,7 @@ export function validateIngest(patch, options) {
     }
     if (previous && !covered(previous.aliases, page.aliases)) return { ok: false, code: 'INDEX_DROPPED', id }
     if (previous && !covered(previous.claims, page.claims)) return { ok: false, code: 'INDEX_DROPPED', id }
+    if (previous && !covered(previous.relations, page.relations)) return { ok: false, code: 'INDEX_DROPPED', id }
     checked.push({ ...page, sources, cites: [] })
   }
   return { ok: true, pages: checked, summary: limitText(patch.summary, 200) }
@@ -51,10 +53,16 @@ export function validateLint(patch, options) {
     if (!sameSet(sources, previous.sources) || !sameSet(cites, previous.cites)) {
       return { ok: false, code: 'SOURCE_DROPPED', id }
     }
-    if (!covered(previous.aliases, page.aliases) || !covered(previous.claims, page.claims)) {
+    if (!covered(previous.aliases, page.aliases) || !covered(previous.claims, page.claims) || !covered(previous.relations, page.relations)) {
       return { ok: false, code: 'INDEX_DROPPED', id }
     }
-    checked.push({ ...page, sources, cites })
+    checked.push({
+      ...page,
+      sources,
+      cites,
+      ...(page.locator || previous.locator ? { locator: page.locator || previous.locator } : {}),
+      partial: page.partial === true || previous.partial === true,
+    })
   }
   return { ok: true, pages: checked, summary: limitText(patch.summary, 200) }
 }
@@ -121,6 +129,8 @@ function checkPage(page) {
   if (aliases.code) return aliases
   const claims = textList(page.claims, 8, 160, 'claims')
   if (claims.code) return claims
+  const relations = relationList(page)
+  if (relations.code) return relations
   return {
     kind: page.kind,
     slug: page.slug,
@@ -132,8 +142,28 @@ function checkPage(page) {
     contradicts,
     aliases,
     claims,
+    relations,
     update: page.update === true,
+    ...(typeof page.locator === 'string' && page.locator.trim() ? { locator: page.locator.trim().slice(0, 180) } : {}),
+    ...(page.partial === true ? { partial: true } : {}),
   }
+}
+
+/** 关系最多 16 条，每条是「谓语 目标页」，不能指向自己或提问页。 */
+function relationList(page) {
+  if (page.relations == null) return []
+  if (!Array.isArray(page.relations)) return { ok: false, code: 'BAD_PATCH', message: 'relations' }
+  const self = pageId(page.kind, page.slug)
+  const items = []
+  for (const item of page.relations) {
+    if (typeof item !== 'string') return { ok: false, code: 'BAD_PATCH', message: 'relations' }
+    const parsed = parseRelation(item.trim())
+    if (!parsed || parsed.to === self) return { ok: false, code: 'BAD_PATCH', message: 'relations' }
+    items.push(`${parsed.type} ${parsed.to}`)
+  }
+  const deduped = [...new Set(items)]
+  if (deduped.length > 16) return { ok: false, code: 'BAD_PATCH', message: 'relations' }
+  return deduped
 }
 
 function unique(value) {

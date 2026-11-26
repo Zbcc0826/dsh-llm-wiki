@@ -6,8 +6,9 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { queryGraph } from './graph.js'
 import { decideLlm, readMode } from './llm-mode.js'
-import { createRegistry } from './parsers.js'
+import { PARSER_SERVICE, createRegistry, externalSlots } from './parsers.js'
 import { catalogOf, ensureWiki, orphansOf, wikiRoot } from './store.js'
 import { ingest, lint, query } from './workflow.js'
 
@@ -18,6 +19,14 @@ export const inject = ['tools']
 export function apply(ctx) {
   const registry = createRegistry()
   registerSkill(ctx)
+  if (typeof ctx.provide === 'function') {
+    ctx.provide(PARSER_SERVICE, {
+      register: (parser) => registry.register(parser),
+      list: () => registry.list(),
+      accept: (document) => registry.accept(document),
+      external: () => externalSlots(registry.list()),
+    })
+  }
 
   ctx.tools.register(defineTool({
     name: 'wiki_status',
@@ -36,6 +45,7 @@ export function apply(ctx) {
         broken: catalog.broken,
         orphans: orphansOf(root),
         parsers: registry.list(),
+        external: externalSlots(registry.list()),
         recent: recentLog(root),
       })
     },
@@ -47,7 +57,7 @@ export function apply(ctx) {
     parameters: {},
     output: textOutput(),
     async execute() {
-      return JSON.stringify({ ok: true, parsers: registry.list() })
+      return JSON.stringify({ ok: true, parsers: registry.list(), external: externalSlots(registry.list()) })
     },
   }))
 
@@ -69,12 +79,13 @@ export function apply(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'wiki_ingest',
-    description: '把一份材料解析后写入知识维基。路径和文本只能给一个。批准后才写，原料不会被修改。',
+    description: '把一份材料解析后写入知识维基。路径、文本、parsed 三者只能给一个。parsed 是其他插件交来的 PDF、Office 或音视频成果。批准后才写，原料不会被修改。',
     parameters: {
       path: { type: 'string', description: '原料文件的路径' },
       text: { type: 'string', description: '直接给出的文本。与 path 二选一' },
       title: { type: 'string', description: '材料标题' },
       mediaType: { type: 'string', description: '媒体类型，例如 application/json 或 text/html' },
+      parsed: { type: 'string', description: '其他插件已经解析好的 PDF、Office 或音视频成果，JSON 字符串。与 path、text 三选一。' },
       llm: { type: 'string', description: '用户已经选定的做法：dsh、key 或 off。没选过就不要代填，让插件直接问用户。' },
     },
     output: textOutput(),
@@ -112,6 +123,26 @@ export function apply(ctx) {
         approve: (copy) => askApproval(ctx, exec, 'wiki_query', copy),
       })
       return JSON.stringify(result)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'wiki_graph',
+    description: '从某个实体、事件或名字出发，沿关系走若干跳。不调用模型。predicate 可只走一种谓语。',
+    parameters: {
+      start: { type: 'string', required: true, description: '页标识、标题或别名，例如 entity/acme' },
+      hops: { type: 'integer', description: '最多走几跳，0 到 4，默认 2' },
+      predicate: { type: 'string', description: '只走这一种关系，例如 works-for。不填则关系、链接和矛盾都走' },
+    },
+    output: textOutput(),
+    async execute(args) {
+      const root = wikiRoot()
+      ensureWiki(root)
+      return JSON.stringify(queryGraph(catalogOf(root).pages, {
+        start: args.start,
+        hops: args.hops,
+        predicate: args.predicate,
+      }))
     },
   }))
 

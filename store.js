@@ -5,17 +5,17 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
-import { KINDS, readPages, writePage } from './pages.js'
+import { KINDS, linksIn, readPages, writePage } from './pages.js'
 
 export const SCHEMA_TEXT = `# 图式
 
 原料在 raw/，只读。维基由插件按校验过的补丁写入 pages/。index.md 和 log.md 由插件生成，不要直接修改。
 
-页面分四类：source 是一份材料的摘要，entity 是人、组织、地点或作品，concept 是概念，query 是被明确要求留下的提问。
+页面分五类：source 是一份材料的摘要，entity 是人、组织、地点或作品，event 是一件发生过的事，concept 是概念，query 是被明确要求留下的提问。
 
-已有页面只能在补丁里写 update: true 后修改。sources 只增加，不删除。互相矛盾的主张写进 contradicts，两面都留在正文里。aliases 是读者会拿来查找的词，包括正文没写但读者会用的常见叫法。claims 是可以单独被检索的原子主张。更新已有页时，原来的 aliases 和 claims 必须保留。材料若标明未完整交给模型，不要把它写成已经读完。
+已有页面只能在补丁里写 update: true 后修改。sources 只增加，不删除。互相矛盾的主张写进 contradicts，两面都留在正文里。aliases 是读者会拿来查找的词，包括正文没写但读者会用的常见叫法。claims 是可以单独被检索的原子主张。relations 每条写成「谓语 目标页」，例如 works-for entity/acme。谓语用小写连字符，目标是 source、entity、event 或 concept。更新已有页时，原来的 aliases、claims 和 relations 必须保留。材料若标明未完整交给模型，不要把它写成已经读完。
 
-正文用 [[种类/slug]] 指向别的页。
+正文用 [[种类/slug]] 指向别的页。很长的材料按章节和表格分成多段，每段共用同一份原料哈希和同一条索引头，目录页链到各段。PDF、Office 和音视频由其他插件解析后，把带位置的文本和表格交进来。
 `
 
 /** 维基根目录。LLM_WIKI_ROOT 优先，否则放在 DSH 主目录下。 */
@@ -72,6 +72,8 @@ export function rebuildIndex(root) {
       if (aliases) lines.push(`  别名：${aliases}`)
       if (claim) lines.push(`  主张：${claim}`)
       if (links) lines.push(`  链接：${links}`)
+      const relations = (page.relations ?? []).join('、')
+      if (relations) lines.push(`  关系：${relations}`)
     }
     lines.push('')
   }
@@ -107,11 +109,6 @@ function writeContradictions(root, pages) {
 
 function firstClaim(page) {
   return (page.claims ?? [])[0] || page.summary || page.title
-}
-
-function linksIn(body) {
-  return [...String(body ?? '').matchAll(/\[\[(source|entity|concept|query)\/([a-z0-9]+(?:-[a-z0-9]+)*)\]\]/g)]
-    .map((match) => `${match[1]}/${match[2]}`)
 }
 
 /** 追加一条可被 grep "^## \\[" 认出的日志。 */
@@ -159,13 +156,14 @@ export function catalogOf(root, limit = 100) {
     sources: page.sources,
     cites: page.cites,
     contradicts: page.contradicts,
+    relations: page.relations ?? [],
     partial: page.partial,
   }))
   return { entries: shown, total: pages.length, truncated: pages.length > limit, broken, pages }
 }
 
 function kindLabel(kind) {
-  return { source: '来源', entity: '实体', concept: '概念', query: '提问' }[kind]
+  return { source: '来源', entity: '实体', event: '事件', concept: '概念', query: '提问' }[kind]
 }
 
 function safeExt(ext) {

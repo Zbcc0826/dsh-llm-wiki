@@ -5,8 +5,11 @@ import { readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { extractJson } from './llm.js'
 import { applyPatch, validateIngest, validateLint, validateQuery } from './patch.js'
-import { extensionOf } from './parsers.js'
+import { relationsOf } from './graph.js'
+import { linksIn } from './pages.js'
+import { acceptParsed, extensionOf } from './parsers.js'
 import { presentSource } from './present.js'
+import { MAX_SEGMENTS, SEGMENT_CHARS, segmentLocator, splitSource } from './split.js'
 import { createRegistry } from './parsers.js'
 import { appendLog, catalogOf, ensureWiki, hashBytes, SCHEMA_TEXT, writeRaw } from './store.js'
 import { defaultEmbedder } from './embed.js'
@@ -22,7 +25,7 @@ export async function ingest(options) {
   const loaded = loadSource(options.input ?? {})
   if (!loaded.ok) return observe(loaded)
   const registry = options.registry ?? createRegistry()
-  const parsed = registry.parse({
+  const parsed = loaded.parsed ?? registry.parse({
     path: options.input.path,
     text: loaded.text,
     bytes: loaded.bytes,
@@ -32,28 +35,17 @@ export async function ingest(options) {
   ensureWiki(options.root)
   const title = options.input.title || parsed.title
   const hash = hashBytes(loaded.bytes)
-  const presented = presentSource(parsed, { maxChars: options.maxChars })
   const catalog = catalogOf(options.root)
-  const messages = ingestMessages({
-    schema: readSchema(options.root),
-    catalog,
-    presented,
-    hash,
-    title,
-  })
-  let drafted = await askModel(options.complete, messages)
+  const pieceLimit = Math.min(options.maxChars ?? SEGMENT_CHARS, SEGMENT_CHARS)
+  const split = splitSource(parsed.text, { maxChars: pieceLimit, maxSegments: options.maxSegments ?? MAX_SEGMENTS })
+  const drafted = split.segments.length > 1 || split.omitted > 0
+    ? await ingestSegments(options, { parsed, title, hash, catalog, split })
+    : await ingestOne(options, { parsed, title, hash, catalog })
   if (!drafted.ok) return failAttempt(options, title, drafted)
-  let checked = validateIngest(drafted.value, { hash, existing: existingMap(catalog.pages) })
-  if (!checked.ok && checked.code === 'BAD_PATCH') {
-    drafted = await askModel(options.complete, repairMessages(messages, checked.message || 'BAD_PATCH', hash))
-    if (!drafted.ok) return failAttempt(options, title, drafted)
-    checked = validateIngest(drafted.value, { hash, existing: existingMap(catalog.pages) })
-  }
-  if (!checked.ok) return failAttempt(options, title, checked)
-  const names = checked.pages.map((page) => `${page.kind}/${page.slug}`)
+  const names = drafted.pages.map((page) => `${page.kind}/${page.slug}`)
   const approved = await gate(options.approve, {
-    zh: `把「${title}」写进知识维基，更新 ${names.join('、')}。原料不改。${presented.partial ? '材料没有完整交给模型。' : ''}`,
-    en: `File "${title}" into the wiki: ${names.join(', ')}. Raw sources stay unchanged.${presented.partial ? ' The source was incomplete.' : ''}`,
+    zh: `把「${title}」写进知识维基，更新 ${names.join('、')}。原料不改。${drafted.partial ? '材料没有完整交给模型。' : ''}`,
+    en: `File "${title}" into the wiki: ${names.join(', ')}. Raw sources stay unchanged.${drafted.partial ? ' The source was incomplete.' : ''}`,
   })
   if (!approved.ok) return failAttempt(options, title, approved)
   const raw = writeRaw(options.root, loaded.bytes, {
@@ -61,17 +53,196 @@ export async function ingest(options) {
     title,
     mediaType: parsed.mediaType,
     parser: parsed.parser,
-    origin: options.input.path || '',
+    origin: options.input.path || (parsed.foreign ? `parsed:${parsed.parser}` : ''),
   })
   const now = options.now?.() ?? new Date()
-  applyPatch(options.root, checked, {
-    partial: presented.partial,
+  applyPatch(options.root, { pages: drafted.pages, summary: drafted.summary }, {
+    partial: false,
     updated: now.toISOString(),
     date: day(now),
     op: 'ingest',
     title,
   })
-  return { ok: true, hash: raw.hash, pages: names, partial: presented.partial, model: drafted.model, approved: true, outcome: 'allowed-once' }
+  return {
+    ok: true,
+    hash: raw.hash,
+    pages: names,
+    partial: drafted.partial,
+    segments: drafted.segments ?? 1,
+    model: drafted.model,
+    approved: true,
+    outcome: 'allowed-once',
+  }
+}
+
+/** 短材料仍一次交给模型。 */
+async function ingestOne(options, { parsed, title, hash, catalog }) {
+  const presented = presentSource(parsed, { maxChars: options.maxChars })
+  const messages = ingestMessages({ schema: readSchema(options.root), catalog, presented, hash, title })
+  const checked = await draftPatch(options, messages, hash, existingMap(catalog.pages))
+  if (!checked.ok) return checked
+  const pages = presented.partial ? checked.pages.map((page) => ({ ...page, partial: true })) : checked.pages
+  return { ok: true, pages, summary: checked.summary, partial: presented.partial, model: checked.model, segments: 1 }
+}
+
+/**
+ * 长材料切成多段。每段单独请模型整理，但共用原料哈希和索引头。
+ * 目录页把各段串起来。任何一段失败，整份材料都不落盘。
+ */
+async function ingestSegments(options, { parsed, title, hash, catalog, split }) {
+  const parent = `src-${hash.slice(0, 10)}`
+  const alias = sharedAlias(title)
+  const existing = existingMap(catalog.pages)
+  const pages = []
+  let model = ''
+  const images = presentSource(parsed, { maxChars: 0 }).images
+  for (const segment of split.segments) {
+    const slug = `${parent}-${segment.index}`
+    const locator = segmentLocator(title, segment).slice(0, 180)
+    const presented = {
+      partial: false,
+      images: segment.index === 1 ? images : [],
+      text: `${locator}\n\n${segment.text}`,
+    }
+    const messages = ingestMessages({
+      schema: readSchema(options.root),
+      catalog,
+      presented,
+      hash,
+      title,
+      segment: { index: segment.index, total: segment.total, slug, locator, alias },
+    })
+    const checked = await draftPatch(options, messages, hash, existing, (pages) => pinSegment(pages, {
+      slug,
+      hash,
+      title: segmentTitle(title, segment),
+      locator,
+      text: segment.text,
+      alias,
+      summary: segment.heading || title,
+    }))
+    if (!checked.ok) return checked
+    const pinned = checked.pages
+    for (const page of pinned) {
+      existing.set(`${page.kind}/${page.slug}`, page)
+      pages.push(page)
+    }
+    remember(catalog, pinned)
+    model = checked.model || model
+  }
+  const index = indexPage({ parent, title, hash, alias, pages, omitted: split.omitted, total: split.segments.length })
+  const indexChecked = validateIngest({ summary: index.summary, pages: [index] }, { hash, existing })
+  if (!indexChecked.ok) return indexChecked
+  const incomplete = split.omitted > 0 || parsed.partial === true
+  const filedIndex = { ...indexChecked.pages[0], locator: index.locator, partial: incomplete }
+  return {
+    ok: true,
+    pages: [filedIndex, ...pages],
+    summary: `「${title}」分成 ${split.segments.length} 段`,
+    partial: incomplete,
+    model,
+    segments: split.segments.length,
+  }
+}
+
+/** 请模型写补丁。第一次不合格就按缺的字段再要一次。prepare 可在校验前改写页面。 */
+async function draftPatch(options, messages, hash, existing, prepare) {
+  let drafted = await askModel(options.complete, messages)
+  if (!drafted.ok) return drafted
+  const check = (value) => validateIngest(
+    { ...value, pages: prepare ? prepare(value?.pages) : value?.pages },
+    { hash, existing },
+  )
+  let checked = check(drafted.value)
+  if (!checked.ok && checked.code === 'BAD_PATCH') {
+    drafted = await askModel(options.complete, repairMessages(messages, checked.message || 'BAD_PATCH', hash))
+    if (!drafted.ok) return drafted
+    checked = check(drafted.value)
+  }
+  if (!checked.ok) return checked
+  return { ...checked, model: drafted.model }
+}
+
+/** 来源页固定到这一段的 slug，正文保留这段原文，别名带上整份材料的索引头。 */
+function pinSegment(pages, segment) {
+  const list = Array.isArray(pages) ? pages.filter((page) => page && typeof page === 'object') : []
+  const rest = list.filter((page) => page.kind !== 'source')
+  const source = list.find((page) => page.kind === 'source') ?? {
+    kind: 'source',
+    summary: String(segment.summary || segment.title).slice(0, 200),
+    claims: [],
+    contradicts: [],
+    cites: [],
+  }
+  return [{
+    ...source,
+    kind: 'source',
+    slug: segment.slug,
+    title: segment.title.slice(0, 120),
+    summary: String(source.summary || segment.summary || segment.title).slice(0, 200),
+    body: segment.text.slice(0, 8000),
+    locator: segment.locator,
+    partial: segment.text.length > 8000,
+    sources: [...new Set([segment.hash, ...(source.sources ?? [])])],
+    aliases: uniqueLimited([segment.alias, ...(source.aliases ?? [])], 8),
+    update: false,
+  }, ...rest]
+}
+
+/** 整份材料共用的短索引头，方便以后用同一个名字找到每一段。 */
+function sharedAlias(title) {
+  const text = String(title ?? '').replace(/\s+/g, ' ').trim()
+  return text ? text.slice(0, 40) : ''
+}
+
+function segmentTitle(title, segment) {
+  const suffix = `（${segment.index}/${segment.total}）`
+  const head = String(title || segment.heading || '材料').trim()
+  return `${head.slice(0, Math.max(1, 120 - suffix.length))}${suffix}`
+}
+
+/** 目录页链到各段。没有纳入的尾巴只标在这一页上。 */
+function indexPage({ parent, title, hash, alias, pages, omitted, total }) {
+  const links = pages
+    .filter((page) => page.kind === 'source')
+    .map((page) => `- [[source/${page.slug}]] ${page.title}`)
+  const tail = omitted > 0 ? `\n\n后面约 ${omitted} 字这一次没有纳入。` : ''
+  return {
+    kind: 'source',
+    slug: parent,
+    title: String(title || '材料').slice(0, 120),
+    summary: (`共 ${total} 段${omitted > 0 ? '，后面还有未纳入的文字' : ''}`).slice(0, 200),
+    body: `同一份材料，索引头相同。\n\n${links.join('\n')}${tail}`,
+    sources: [hash],
+    aliases: alias ? [alias] : [],
+    claims: [],
+    contradicts: [],
+    cites: [],
+    locator: String(title || '材料').slice(0, 180),
+  }
+}
+
+/** 下一段还能看见这一段刚整理出来的页。 */
+function remember(catalog, pages) {
+  for (const page of pages) {
+    catalog.pages.push(page)
+    catalog.entries.push({
+      id: `${page.kind}/${page.slug}`,
+      title: page.title,
+      summary: page.summary,
+      aliases: page.aliases ?? [],
+      claims: page.claims ?? [],
+      sources: page.sources ?? [],
+      cites: page.cites ?? [],
+      contradicts: page.contradicts ?? [],
+      relations: page.relations ?? [],
+      partial: page.partial === true,
+    })
+  }
+}
+
+function uniqueLimited(items, max) {
+  return [...new Set(items.map((item) => String(item ?? '').trim()).filter(Boolean))].slice(0, max)
 }
 
 /**
@@ -191,6 +362,10 @@ export function localFindings(pages) {
       if (target !== id) inbound.add(target)
       if (!ids.has(target)) findings.push({ code: 'BROKEN_LINK', id, target })
     }
+    for (const relation of relationsOf(page)) {
+      if (ids.has(relation.to)) inbound.add(relation.to)
+      else findings.push({ code: 'MISSING_RELATION', id, target: relation.to, type: relation.type })
+    }
   }
   for (const id of ids) {
     // 来源页是材料入口，没有别的页指向它是正常的。
@@ -237,6 +412,11 @@ function failAttempt(options, title, result) {
 }
 
 function loadSource(input) {
+  const hasPath = Boolean(input.path)
+  const hasText = input.text !== undefined && input.text !== null && input.text !== ''
+  const hasParsed = input.parsed !== undefined && input.parsed !== null && input.parsed !== ''
+  if ([hasPath, hasText, hasParsed].filter(Boolean).length > 1) return { ok: false, code: 'BOTH_SOURCE' }
+  if (hasParsed) return loadParsed(input.parsed)
   if (input.path && input.text !== undefined) return { ok: false, code: 'BOTH_SOURCE' }
   if (input.text !== undefined) {
     const bytes = Buffer.from(String(input.text))
@@ -252,6 +432,18 @@ function loadSource(input) {
   return { ok: true, bytes, text: bytes.toString('utf8'), ext: extensionOf(input.path) || '.bin' }
 }
 
+/** 其他插件交来的解析成果。原始字节优先，没有则保存整理后的文本。 */
+function loadParsed(value) {
+  let document = value
+  if (typeof value === 'string') {
+    try { document = JSON.parse(value) } catch { return { ok: false, code: 'BAD_PARSE', message: 'json' } }
+  }
+  const accepted = acceptParsed(document)
+  if (!accepted.ok) return accepted
+  if (accepted.rawBytes.length > MAX_SOURCE_BYTES) return { ok: false, code: 'TOO_LARGE', bytes: accepted.rawBytes.length }
+  return { ok: true, bytes: accepted.rawBytes, text: accepted.text, ext: accepted.rawExt, parsed: accepted }
+}
+
 function embedFor(options) {
   if (options.embed === false) return undefined
   if (typeof options.embed === 'function') return options.embed
@@ -263,7 +455,13 @@ function existingMap(pages) {
 }
 
 function readSchema(root) {
-  try { return readFileSync(`${root}/schema.md`, 'utf8') } catch { return SCHEMA_TEXT }
+  let text = SCHEMA_TEXT
+  try { text = readFileSync(`${root}/schema.md`, 'utf8') } catch { text = SCHEMA_TEXT }
+  // 已有维基的图式不再覆盖。旧图式没有事件时，只在交给模型的文本里补上。
+  if (!text.includes('event')) {
+    text += '\n事件用 event 页。relations 每条写成「谓语 目标页」，例如 works-for entity/acme。更新时原来的 relations 必须保留。\n'
+  }
+  return text
 }
 
 /** 第一次补丁缺字段时，把缺什么和必须带上的哈希再交给模型一次。 */
@@ -272,12 +470,12 @@ function repairMessages(messages, reason, hash) {
     ...messages,
     {
       role: 'user',
-      content: `上一份补丁不合格：${reason}。每页必须有 summary（1到200字）和 body。sources 必须包含 ${hash}。不要写 query 页。只返回一个 JSON 对象。`,
+      content: `上一份补丁不合格：${reason}。每页必须有 summary（1到200字）和 body。sources 必须包含 ${hash}。relations 每条写成「谓语 目标页」。不要写 query 页。只返回一个 JSON 对象。`,
     },
   ]
 }
 
-function ingestMessages({ schema, catalog, presented, hash, title }) {
+function ingestMessages({ schema, catalog, presented, hash, title, segment }) {
   const payload = JSON.stringify({
     task: 'ingest',
     hash,
@@ -286,9 +484,13 @@ function ingestMessages({ schema, catalog, presented, hash, title }) {
     catalog: catalog.entries,
     catalogTruncated: catalog.truncated,
     source: presented.text,
+    ...(segment ? { segment } : {}),
   })
+  const segmentRule = segment
+    ? `这是同一份材料的第 ${segment.index}/${segment.total} 段。来源页 slug 用 ${segment.slug}。${segment.alias ? `aliases 必须包含「${segment.alias}」。` : ''}只写这一段里有的事实。`
+    : ''
   return [
-    { role: 'system', content: `${schema}\n只返回一个 JSON 对象。图像里的数字和文字也要写进页面。每页必须有 summary，sources 必须包含给出的 hash。每页带 aliases（读者以后会拿来查找的词，包括正文没写但读者会用的常见叫法，最多 8 个，没有把握就少写）和 claims（原子主张，最多 8 条）。更新已有页时，原来的 aliases 和 claims 必须保留。` },
+    { role: 'system', content: `${schema}\n只返回一个 JSON 对象。图像里的数字和文字也要写进页面。每页必须有 summary，sources 必须包含给出的 hash。每页带 aliases（读者以后会拿来查找的词，包括正文没写但读者会用的常见叫法，最多 8 个，没有把握就少写）和 claims（原子主张，最多 8 条）。事件写成 event 页。relations 每条写成「谓语 目标页」，谓语用小写连字符，例如 works-for entity/acme。更新已有页时，原来的 aliases、claims 和 relations 必须保留。${segmentRule}` },
     { role: 'user', content: withImages(payload, presented.images) },
   ]
 }
@@ -374,14 +576,9 @@ function pageOf(id) {
 
 function lintMessages(schema, catalog, findings) {
   return [
-    { role: 'system', content: `${schema}\n只修改已有页面，sources 和 cites 必须原样保留。只返回 JSON：{"summary":"","pages":[]}。` },
+    { role: 'system', content: `${schema}\n只修改已有页面，sources、cites 和 relations 必须原样保留或只增加。只返回 JSON：{"summary":"","pages":[]}。` },
     { role: 'user', content: JSON.stringify({ findings, catalog: catalog.entries }) },
   ]
-}
-
-function linksIn(body) {
-  return [...String(body ?? '').matchAll(/\[\[(source|entity|concept|query)\/([a-z0-9]+(?:-[a-z0-9]+)*)\]\]/g)]
-    .map((match) => `${match[1]}/${match[2]}`)
 }
 
 function unique(value) {

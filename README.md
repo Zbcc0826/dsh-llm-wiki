@@ -41,9 +41,10 @@ node install.mjs
 
 提问时先看目录卡片：标题、别名、一句主张。别名对上了，就比正文里顺带出现的同一个词更靠前。然后打开少数几页，顺着 `[[链接]]` 再看一页，并留下矛盾的另一面。没有共同词时，用本地的 multilingual-e5-small 向量补一档；词面和目录都拉不开时，再换一组读者会去查的词条名。证据句用来重排，不从页首硬读。最多返回 10 条证据，然后只根据这些证据作答。
 
-- `wiki_ingest`：解析一份材料并更新相关页面。路径和文本只能给一个。批准后才写。别名写成读者以后会拿来查找的词。
-- `wiki_query`：先取证再回答。不读取原料。`file` 为 true 才把答案留下。
-- `wiki_lint`：报告断链、孤立页和不完整材料。`apply` 为 true 才改已有页面，不新建，也不删除依据。
+- `wiki_ingest`：解析一份材料并更新相关页面。路径和文本只能给一个。批准后才写。别名写成读者以后会拿来查找的词。超过一页的材料按章节和表格切开，各段共用同一份原料和同一条索引头；表格不和表头拆开。一次最多展开 8 段，后面没读到的字只标在目录页上。
+- `wiki_query`：先取证再回答。不读取原料。`file` 为 true 才把答案留下。取证会顺着 relations 再走一跳。
+- `wiki_graph`：从实体、事件或别名出发沿关系查询。不调用模型。`hops` 为 0 到 4，`predicate` 可只走一种谓语。
+- `wiki_lint`：报告断链、孤立页、断掉的关系和不完整材料。`apply` 为 true 才改已有页面，不新建，也不删除依据。
 - `wiki_read` / `wiki_status` / `wiki_parsers`：只读。
 
 没有审批界面时，写入返回 `NOT_APPROVED`，不挂起。
@@ -52,7 +53,11 @@ node install.mjs
 
 `parsers.js` 的 `createRegistry` 接受额外解析器，放在内建之前。解析器实现 `accepts` 和 `parse`。图像解析器留下像素，不编造识别结果。`present.js` 的 `presentSource` 决定模型实际看见多少字，以及最多 4 张图。不认识的类型返回 `NO_PARSER`。
 
-内建类型：图像、markdown、纯文本、JSON、CSV、HTML。第一次查询会下载向量权重，缓存在插件目录的 `.cache`。下载失败就退回词面、目录和链接。
+内建类型：图像、markdown、纯文本、JSON、CSV、HTML。PDF、Word、Excel、PPT、音频和视频不在这里解析。遇到这些文件返回 `NEED_EXTERNAL_PARSER`。别的插件可以注入服务 `llm-wiki.parsers`：`register` 接上自己的解析器，`accept` 预览一份成果。也可以把成果作为 `wiki_ingest` 的 `parsed` 传入，与路径、文本三选一。成果里用 `parts` 带上 `text`、`table`、`caption`、`transcript` 或 `image`，并用 `locator` 写页码、幻灯片或时间点。原始文件放在 `source.base64`。位置说明会和紧随的表格留在同一段。
+
+事件写成 `event` 页。关系写在 `relations`，每条是「谓语 目标页」，例如 `works-for entity/acme`。更新时原来的关系必须保留。`wiki_graph` 从这些边出发，也能从目标页走回声明它的那一页。
+
+第一次查询会下载向量权重，缓存在插件目录的 `.cache`。下载失败就退回词面、目录和链接。
 
 还没选定做法时，摄入和提问返回 `NEED_LLM_CHOICE`，不会写 `llm.json`，也不会先把原料存下来。显式传入的 `llm` 会覆盖已记住的做法并立刻生效。`wiki_llm` 更改仍会再确认一次。选 DSH 时用当前会话里的模型，例如 dsv4flash，消息按文本块发送。选密钥时才请求 `deepseek-v4-flash`；字面量 `dsv4.1flash` 会被接口拒绝，响应里的模型名通常是 `deepseek-flash`。选不做时，查阅和检查仍然可用，摄入在写盘前就返回 `LLM_OFF`。失败记在 `log.md`。`wiki_status` 的 `orphans` 列出没有页面引用的原料。写入结果带 `approved` 和 `outcome`。
 

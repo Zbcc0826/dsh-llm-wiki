@@ -8,9 +8,11 @@ import path from 'node:path'
 import test from 'node:test'
 import { extractJson, loadKey, MODEL, redact } from './llm.js'
 import { parsePage, readPages, serializePage, writePage } from './pages.js'
-import { createRegistry } from './parsers.js'
+import { acceptParsed, createRegistry, externalSlots } from './parsers.js'
+import { queryGraph } from './graph.js'
 import { validateIngest } from './patch.js'
 import { presentSource } from './present.js'
+import { splitSource } from './split.js'
 import { hitsAtK, retrieve } from './retrieve.js'
 import { EMBED_MODEL, createEmbedder } from './embed.js'
 import { orphansOf, rebuildIndex, wikiRoot } from './store.js'
@@ -36,8 +38,151 @@ test('解析器区分文本、表格、JSON、HTML，不认识的类型不假装
   assert.equal(plain.parser, 'plain')
   const pdf = registry.parse({ path: 'a.pdf', mediaType: 'application/pdf', text: '%PDF' })
   assert.equal(pdf.ok, false)
-  assert.equal(pdf.code, 'NO_PARSER')
-  assert.equal(pdf.mediaType, 'application/pdf')
+  assert.equal(pdf.code, 'NEED_EXTERNAL_PARSER')
+  assert.equal(pdf.family, 'pdf')
+  const zip = registry.parse({ path: 'a.zip', mediaType: 'application/zip', text: 'PK' })
+  assert.equal(zip.code, 'NO_PARSER')
+})
+
+test('外部解析成果保留位置和表格，原始字节单独保存', async () => {
+  const registry = createRegistry()
+  const registered = registry.register({
+    id: 'pdf',
+    mediaTypes: ['application/pdf'],
+    accepts: (input) => input.mediaType === 'application/pdf',
+    parse: () => ({ document: { parser: 'pdf', mediaType: 'application/pdf', title: '合同', text: '第一页正文' } }),
+  })
+  assert.equal(registered.ok, true)
+  const viaParser = registry.parse({ path: 'a.pdf', mediaType: 'application/pdf', bytes: Buffer.from('%PDF') })
+  assert.equal(viaParser.ok, true)
+  assert.equal(viaParser.text, '第一页正文')
+  assert.equal(externalSlots(registry.list()).find((item) => item.family === 'pdf').ready, true)
+  registered.dispose()
+  assert.equal(registry.parse({ path: 'a.pdf', mediaType: 'application/pdf' }).code, 'NEED_EXTERNAL_PARSER')
+  assert.equal(registry.register({ id: 'PDF', mediaTypes: ['application/pdf'], accepts() {}, parse() {} }).code, 'BAD_PARSER')
+
+  const original = Buffer.from('pdf-bytes')
+  const table = '| 指标 | 数值 |\n| --- | --- |\n| 稀释每股收益 | -0.16 |'
+  const preview = acceptParsed({
+    parser: 'demo-pdf',
+    mediaType: 'application/pdf',
+    title: '年报',
+    source: { name: '年报.pdf', base64: original.toString('base64') },
+    parts: [{ role: 'table', locator: '第4页', text: table }],
+  })
+  assert.equal(preview.ok, true)
+  assert.match(preview.text, /位置：第4页/)
+  assert.match(preview.text, /稀释每股收益/)
+  assert.match(preview.text, /-0\.16/)
+  const root = tempWiki()
+  const seen = []
+  const result = await ingest({
+    root,
+    input: {
+      title: '年报',
+      parsed: {
+        parser: 'demo-pdf',
+        mediaType: 'application/pdf',
+        title: '年报',
+        source: { name: '年报.pdf', base64: original.toString('base64') },
+        parts: [{ role: 'table', locator: '第4页', text: table }],
+      },
+    },
+    approve: async () => 'allowed-once',
+    complete: async (messages) => {
+      seen.push(JSON.parse(messages.at(-1).content))
+      return {
+        ok: true,
+        model: 'deepseek-flash',
+        text: JSON.stringify({
+          summary: '记下年报',
+          pages: [{
+            kind: 'source', slug: 'report', title: '年报', summary: '有一张表', body: '见表。',
+            sources: [seen.at(-1).hash], aliases: ['年报'], claims: ['稀释每股收益为 -0.16'],
+          }],
+        }),
+      }
+    },
+  })
+  assert.equal(result.ok, true, result.message)
+  assert.match(seen[0].source, /位置：第4页/)
+  assert.match(seen[0].source, /-0\.16/)
+  const rawFile = readdirSync(path.join(root, 'raw')).find((name) => name.endsWith('.pdf'))
+  assert.equal(readFileSync(path.join(root, 'raw', rawFile)).equals(original), true)
+  const meta = JSON.parse(readFileSync(path.join(root, 'raw', `${result.hash}.meta.json`), 'utf8'))
+  assert.equal(meta.parser, 'demo-pdf')
+  assert.equal(meta.mediaType, 'application/pdf')
+  assert.equal(meta.origin, 'parsed:demo-pdf')
+  const both = await ingest({
+    root,
+    input: { path: 'a.pdf', parsed: { parser: 'demo-pdf', mediaType: 'application/pdf', text: 'x' } },
+    approve: async () => 'allowed-once',
+    complete: async () => { throw new Error('两种材料不应调用模型') },
+  })
+  assert.equal(both.code, 'BOTH_SOURCE')
+})
+
+test('实体、事件和关系可以沿边查询', async () => {
+  const hash = 'a'.repeat(64)
+  const pages = [
+    { kind: 'entity', slug: 'vendor', title: '供应商', summary: '供货方', body: 'zephyr-supply', aliases: ['乙方'], claims: [], relations: ['supplies entity/plant'], contradicts: [], sources: [hash], partial: false },
+    { kind: 'entity', slug: 'plant', title: '整车厂', summary: '买方', body: '甲方。', aliases: [], claims: [], relations: ['party-to event/claim'], contradicts: [], sources: [hash], partial: false },
+    { kind: 'event', slug: 'claim', title: '质量纠纷', summary: '索赔', body: '责任上限有两套约定。', aliases: [], claims: [], relations: [], contradicts: [], sources: [hash], partial: false },
+  ]
+  const findings = localFindings(pages)
+  assert.equal(findings.some((item) => item.id === 'event/claim' && item.code === 'ORPHAN'), false)
+  assert.equal(findings.some((item) => item.id === 'entity/plant' && item.code === 'ORPHAN'), false)
+  assert.equal(findings.some((item) => item.id === 'entity/vendor' && item.code === 'ORPHAN'), true)
+  const broken = localFindings([{ ...pages[0], relations: ['party-to event/missing'] }])
+  assert.equal(broken.some((item) => item.code === 'MISSING_RELATION' && item.target === 'event/missing'), true)
+  const walked = queryGraph(pages, { start: '乙方', hops: 2 })
+  assert.equal(walked.ok, true)
+  assert.deepEqual(walked.roots, ['entity/vendor'])
+  assert.equal(walked.nodes.some((node) => node.id === 'event/claim'), true)
+  const supplies = queryGraph(pages, { start: 'entity/vendor', hops: 2, predicate: 'supplies' })
+  assert.equal(supplies.nodes.some((node) => node.id === 'event/claim'), false)
+  assert.equal(supplies.edges.some((edge) => edge.type === 'supplies' && edge.to === 'entity/plant'), true)
+  const back = queryGraph(pages, { start: 'event/claim', hops: 2 })
+  assert.equal(back.nodes.some((node) => node.id === 'entity/vendor'), true)
+  const dropped = validateIngest({
+    summary: '更新',
+    pages: [{
+      kind: 'entity', slug: 'vendor', title: '供应商', summary: '供货方', body: '乙方。',
+      sources: [hash], relations: [], update: true,
+    }],
+  }, { hash, existing: new Map([['entity/vendor', pages[0]]]) })
+  assert.equal(dropped.code, 'INDEX_DROPPED')
+  const filler = Array.from({ length: 45 }, (_item, index) => ({
+    kind: 'source', slug: `pad${index}`, title: `pad${index}`, summary: 'pad', body: 'weather report', contradicts: [], relations: [], partial: false,
+  }))
+  const found = await retrieve('zephyr-supply', [...filler, ...pages], { embed: false, semantic: false, scanLimit: 40 })
+  assert.equal(hitsAtK(found.hits, ['entity/plant']), 1)
+  const root = tempWiki()
+  const filed = await ingest({
+    root,
+    input: { text: '乙方给整车厂供货，后来发生质量纠纷。', title: '纠纷' },
+    approve: async () => 'allowed-once',
+    complete: async (messages) => {
+      const sourceHash = JSON.parse(messages.at(-1).content).hash
+      return {
+        ok: true,
+        model: 'deepseek-flash',
+        text: JSON.stringify({
+          summary: '记下纠纷',
+          pages: [
+            { kind: 'entity', slug: 'vendor', title: '供应商', summary: '供货方', body: '乙方。', sources: [sourceHash], aliases: ['乙方'], relations: ['supplies entity/plant'] },
+            { kind: 'entity', slug: 'plant', title: '整车厂', summary: '买方', body: '甲方。', sources: [sourceHash], relations: ['party-to event/claim'] },
+            { kind: 'event', slug: 'claim', title: '质量纠纷', summary: '索赔', body: '两套责任上限。', sources: [sourceHash] },
+          ],
+        }),
+      }
+    },
+  })
+  assert.equal(filed.ok, true, filed.message)
+  const stored = readPages(root).pages
+  assert.equal(stored.some((page) => page.kind === 'event' && page.slug === 'claim'), true)
+  const graph = queryGraph(stored, { start: '乙方', hops: 2 })
+  assert.equal(graph.nodes.some((node) => node.id === 'event/claim'), true)
 })
 
 test('超长材料会标明不完整', () => {
@@ -45,6 +190,136 @@ test('超长材料会标明不完整', () => {
   assert.equal(shown.partial, true)
   assert.match(shown.text, /材料未完整交给模型/)
   assert.equal(presentSource({ text: '短', partial: false }).partial, false)
+})
+
+test('长材料按表格切开，表头和数字留在同一段', () => {
+  const table = ['| 指标 | 数值 |', '| --- | --- |', '| 稀释每股收益 | -0.16 |', '| 责任上限 | 6300万 |'].join('\n')
+  const text = ['# 年报', '', '这是年报表前的说明，用来占满第一段。', '', table, '', '# 附件', '', '责任上限为合同总金额的百分之百。'].join('\n')
+  const split = splitSource(text, { maxChars: 80 })
+  assert.equal(split.segments.length > 1, true)
+  const holding = split.segments.find((item) => item.text.includes('-0.16'))
+  assert.ok(holding)
+  assert.match(holding.text, /稀释每股收益/)
+  assert.match(holding.text, /\| --- \|/)
+  const other = split.segments.find((item) => item.text.includes('百分之百'))
+  assert.equal(other.text.includes('-0.16'), false)
+  const wide = ['| 项 | 值 |', '| --- | --- |', ...Array.from({ length: 6 }, (_item, index) => `| 项 | ${index} |`)].join('\n')
+  const rows = splitSource(wide, { maxChars: 40 })
+  assert.equal(rows.segments.length > 1, true)
+  for (const segment of rows.segments) {
+    assert.match(segment.text, /\| 项 \| 值 \|/)
+    assert.match(segment.text, /\| --- \|/)
+  }
+})
+
+test('长材料分成多段，共用一份原料和索引头', async () => {
+  const root = tempWiki()
+  const calls = []
+  const table = ['| 指标 | 数值 |', '| --- | --- |', '| 稀释每股收益 | -0.16 |'].join('\n')
+  const text = `# 年报\n\n${'说明'.repeat(40)}\n\n${table}\n\n# 附件\n\n${'上限'.repeat(40)}`
+  const result = await ingest({
+    root,
+    input: { text, title: '年报' },
+    maxChars: 90,
+    now: () => new Date('2026-11-26T00:00:00.000Z'),
+    approve: async () => 'allowed-once',
+    complete: async (messages) => {
+      calls.push(JSON.parse(messages.at(-1).content))
+      const payload = calls.at(-1)
+      return {
+        ok: true,
+        model: 'deepseek-flash',
+        text: JSON.stringify({
+          summary: '分段',
+          pages: [{
+            kind: 'source',
+            slug: 'ignored',
+            title: '模型标题',
+            summary: '模型摘要',
+            body: '模型只写了摘要',
+            sources: [payload.hash],
+            aliases: ['年报'],
+            claims: ['这一段已核对'],
+          }],
+        }),
+      }
+    },
+  })
+  assert.equal(result.ok, true, result.message)
+  assert.equal(result.partial, false)
+  assert.equal(calls.length, result.segments)
+  assert.equal(calls.length > 1, true)
+  assert.equal(new Set(calls.map((item) => item.hash)).size, 1)
+  const pages = readPages(root).pages
+  const index = pages.find((page) => page.slug.startsWith('src-') && !/-\d+$/.test(page.slug))
+  assert.match(index.body, /索引头相同/)
+  assert.equal(index.partial, false)
+  const parts = pages.filter((page) => /-\d+$/.test(page.slug))
+  assert.equal(parts.length, calls.length)
+  assert.equal(parts.every((page) => page.sources.includes(result.hash) && page.aliases.includes('年报')), true)
+  assert.equal(parts.every((page) => page.locator.includes('年报')), true)
+  const earnings = parts.find((page) => page.body.includes('-0.16'))
+  assert.match(earnings.body, /稀释每股收益/)
+  assert.equal(earnings.body.includes('模型只写了摘要'), false)
+  assert.equal(parts.some((page) => page.body.includes('上限') && !page.body.includes('-0.16')), true)
+  assert.equal(parts.every((page) => page.partial !== true), true)
+  assert.equal(readdirSync(path.join(root, 'raw')).filter((name) => name.endsWith('.meta.json')).length, 1)
+  const failedRoot = tempWiki()
+  let attempts = 0
+  const failed = await ingest({
+    root: failedRoot,
+    input: { text, title: '年报' },
+    maxChars: 90,
+    approve: async () => 'allowed-once',
+    complete: async (messages) => {
+      attempts += 1
+      if (attempts > 1) return { ok: false, code: 'UPSTREAM', message: '第二段失败' }
+      const payload = JSON.parse(messages.at(-1).content)
+      return {
+        ok: true,
+        model: 'deepseek-flash',
+        text: JSON.stringify({
+          summary: '分段',
+          pages: [{
+            kind: 'source', slug: 'ignored', title: '模型标题', summary: '模型摘要', body: '模型只写了摘要', sources: [payload.hash],
+          }],
+        }),
+      }
+    },
+  })
+  assert.equal(failed.ok, false)
+  assert.equal(failed.code, 'UPSTREAM')
+  assert.equal(readdirSync(path.join(failedRoot, 'raw')).filter((name) => !name.startsWith('.')).length, 0)
+  assert.equal(readPages(failedRoot).pages.length, 0)
+  assert.match(readFileSync(path.join(failedRoot, 'log.md'), 'utf8'), /失败 UPSTREAM/)
+  const cappedRoot = tempWiki()
+  const capped = await ingest({
+    root: cappedRoot,
+    input: { text: `${'甲'.repeat(80)}\n\n${'乙'.repeat(80)}`, title: '长文' },
+    maxChars: 50,
+    maxSegments: 1,
+    approve: async () => 'allowed-once',
+    complete: async (messages) => {
+      const payload = JSON.parse(messages.at(-1).content)
+      return {
+        ok: true,
+        model: 'deepseek-flash',
+        text: JSON.stringify({
+          summary: '只纳入开头',
+          pages: [{
+            kind: 'source', slug: 'ignored', title: '长文', summary: '开头', body: '开头', sources: [payload.hash],
+          }],
+        }),
+      }
+    },
+  })
+  assert.equal(capped.ok, true, capped.message)
+  assert.equal(capped.partial, true)
+  const cappedPages = readPages(cappedRoot).pages
+  const cappedIndex = cappedPages.find((page) => !/-\d+$/.test(page.slug))
+  assert.equal(cappedIndex.partial, true)
+  assert.match(cappedIndex.body, /没有纳入/)
+  assert.equal(cappedPages.some((page) => page.body.includes('乙')), false)
 })
 
 test('页面头可以写回，slug 和路径穿越不能进补丁', () => {
@@ -259,16 +534,21 @@ test('密钥不出现在错误文本里，模型名用 deepseek-v4-flash', () =>
   assert.equal(wikiRoot({ LLM_WIKI_ROOT: '/tmp/wiki-root' }), '/tmp/wiki-root')
 })
 
-test('插件入口注册七个工具', async () => {
+test('插件入口注册八个工具', async () => {
   if (!existsSync(path.resolve('node_modules/@deepseek-ai/dsh-tools/package.json'))) return
   const loaded = await import('./index.js')
   assert.equal(loaded.name, 'llm-wiki')
   const names = []
+  let provided = null
   loaded.apply({
     tools: { register(tool) { names.push(tool.name) } },
+    provide(name, value) { provided = { name, value } },
     get() { return null },
   })
-  assert.deepEqual(names, ['wiki_status', 'wiki_parsers', 'wiki_read', 'wiki_ingest', 'wiki_query', 'wiki_lint', 'wiki_llm'])
+  assert.deepEqual(names, ['wiki_status', 'wiki_parsers', 'wiki_read', 'wiki_ingest', 'wiki_query', 'wiki_graph', 'wiki_lint', 'wiki_llm'])
+  assert.equal(provided.name, 'llm-wiki.parsers')
+  assert.equal(typeof provided.value.accept, 'function')
+  assert.equal(typeof provided.value.register, 'function')
 })
 
 test('使用模型前先问用户，选定后记住', async () => {

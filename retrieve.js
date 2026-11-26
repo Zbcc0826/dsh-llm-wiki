@@ -1,6 +1,8 @@
 /**
  * 取证。词面、本地向量、图上的邻页、冲突的另一面，以及对话模型对候选片段的重排，合成最多 10 条证据。
  */
+import { relationNeighbors } from './graph.js'
+import { linksIn } from './pages.js'
 
 /** 词面和向量各自先留这么多条，再做链接扩展。 */
 const RECALL_KEEP = 24
@@ -592,7 +594,7 @@ function expand(pool, pages, byId, hops) {
     for (const pageId of frontier) {
       const page = pages.find((item) => `${item.kind}/${item.slug}` === pageId)
       if (!page) continue
-      const linked = [...linksIn(page.body), ...(page.contradicts ?? [])]
+      const linked = [...linksIn(page.body), ...(page.contradicts ?? []), ...relationNeighbors(page, pages)]
       for (const target of linked) {
         const chunk = [...byId.values()].find((item) => item.page === target)
         if (chunk) {
@@ -665,9 +667,4 @@ function tokens(text) {
     else for (let i = 0; i < run.length - 1; i += 1) out.push(run.slice(i, i + 2))
   }
   return out
-}
-
-function linksIn(body) {
-  return [...String(body ?? '').matchAll(/\[\[(source|entity|concept|query)\/([a-z0-9]+(?:-[a-z0-9]+)*)\]\]/g)]
-    .map((match) => `${match[1]}/${match[2]}`)
 }

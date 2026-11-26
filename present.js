@@ -18,7 +18,7 @@ export function presentSource(parsed, options = {}) {
     .filter((part) => part?.role === 'image' && part.base64)
     .slice(0, 4)
     .map((part) => ({ mediaType: part.mediaType || 'image/png', base64: part.base64 }))
-  const partial = truncated || (parsed?.partial === true && images.length === 0)
+  const partial = truncated || parsed?.partial === true
   const shown = truncated ? text.slice(0, maxChars) : text
   const body = images.length > 0 && !shown ? `[图像 ${parsed?.title || ''}]` : shown
   return {
