@@ -9,7 +9,7 @@ This is a local plugin and is not published to npm. Clone the repo and run the i
 - DeepSeek Harness `0.2.2-rc.3` or newer, and below `0.3.0`
 - A working `dsh` CLI or desktop app
 - The desktop app already includes the pnpm used to install plugins
-- `DEEPSEEK_API_KEY`, or `DEEPSEEK_KEY_FILE` pointing at a key file, when a model call is needed
+- On a model call, the plugin asks whether to use a model already available in DSH (such as dsv4flash), to provide an environment-variable key, or to skip the plugin’s model tasks
 
 ## Install
 
@@ -50,8 +50,8 @@ If there is no approval UI, a write returns `NOT_APPROVED` and does not hang.
 
 The first query downloads the embedding weights into the plugin `.cache` directory. If that download fails, retrieval continues with words, the catalog, and links.
 
-Model calls use `deepseek-v4-flash`. The literal id `dsv4.1flash` is rejected, and the response usually reports `deepseek-flash`.
+A model call asks first. DSH mode uses the model already selected in the session, such as dsv4flash. Key mode requests `deepseek-v4-flash`; the literal id `dsv4.1flash` is rejected, and the response usually reports `deepseek-flash`. Skipping model tasks leaves reading and checks available; ingest and rewrites do not call a model.
 
 ## Keys
 
-Do not commit API keys. The plugin reads `DEEPSEEK_API_KEY`, or the file named by `DEEPSEEK_KEY_FILE`.
+Do not commit API keys. The plugin reads `DEEPSEEK_API_KEY`, or the file named by `DEEPSEEK_KEY_FILE`, only after the user chooses key mode. The choice is stored in `llm.json` inside the wiki directory and contains no key. Change it with `wiki_llm`.

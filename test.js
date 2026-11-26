@@ -254,7 +254,7 @@ test('密钥不出现在错误文本里，模型名用 deepseek-v4-flash', () =>
   assert.equal(wikiRoot({ LLM_WIKI_ROOT: '/tmp/wiki-root' }), '/tmp/wiki-root')
 })
 
-test('插件入口注册六个工具', async () => {
+test('插件入口注册七个工具', async () => {
   if (!existsSync(path.resolve('node_modules/@deepseek-ai/dsh-tools/package.json'))) return
   const loaded = await import('./index.js')
   assert.equal(loaded.name, 'llm-wiki')
@@ -263,7 +263,67 @@ test('插件入口注册六个工具', async () => {
     tools: { register(tool) { names.push(tool.name) } },
     get() { return null },
   })
-  assert.deepEqual(names, ['wiki_status', 'wiki_parsers', 'wiki_read', 'wiki_ingest', 'wiki_query', 'wiki_lint'])
+  assert.deepEqual(names, ['wiki_status', 'wiki_parsers', 'wiki_read', 'wiki_ingest', 'wiki_query', 'wiki_lint', 'wiki_llm'])
+})
+
+test('使用模型前先问用户，选定后记住', async () => {
+  const { decideLlm, readMode } = await import('./llm-mode.js')
+  const root = tempWiki()
+  const asks = []
+  const pending = await decideLlm({
+    root,
+    approve: async (copy) => {
+      asks.push(copy.zh)
+      return 'unavailable'
+    },
+  })
+  assert.equal(pending.code, 'NEED_LLM_CHOICE')
+  assert.deepEqual(pending.choices.map((item) => item.id), ['dsh', 'key', 'off'])
+  assert.equal(readMode(root), '')
+  assert.match(asks[0], /dsv4flash/)
+
+  const off = await decideLlm({
+    root,
+    approve: async () => 'rejected',
+  })
+  assert.equal(off.mode, 'off')
+  assert.equal(readMode(root), 'off')
+  assert.deepEqual(await off.complete([{ role: 'user', content: 'hi' }]), { ok: false, code: 'LLM_OFF' })
+
+  const again = await decideLlm({ root, approve: async () => { throw new Error('不应再问') } })
+  assert.equal(again.mode, 'off')
+})
+
+test('用户指定用 DSH 模型时走当前会话，不读密钥', async () => {
+  const { decideLlm } = await import('./llm-mode.js')
+  const root = tempWiki()
+  let seen
+  const chosen = await decideLlm({
+    root,
+    llm: 'dsh',
+    agent: { model: { current: () => ({ provider: 'deepseek', model: 'dsv4flash' }) } },
+    llmRuntime: {
+      async *stream(request) {
+        seen = request
+        yield { type: 'text-delta', text: '{"ok":true}' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    },
+    approve: async (copy) => {
+      assert.match(copy.zh, /dsv4flash/)
+      return 'allowed-once'
+    },
+  })
+  const result = await chosen.complete([
+    { role: 'system', content: '只返回 JSON' },
+    { role: 'user', content: '你好' },
+  ])
+  assert.equal(result.ok, true)
+  assert.equal(result.model, 'dsv4flash')
+  assert.equal(seen.provider, 'deepseek')
+  assert.equal(seen.model, 'dsv4flash')
+  assert.equal(seen.system, '只返回 JSON')
+  assert.equal(seen.messages.length, 1)
 })
 
 function tempWiki() {

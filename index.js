@@ -1,12 +1,12 @@
 /**
  * LLM Wiki。原料只读，维基按校验过的补丁写入。
- * 需要模型时请求 deepseek-v4-flash，也就是这里能用的 dsv4.1flash。
+ * 需要模型时先问用户：用 DSH 里已有的模型、另提供环境变量密钥，或不做插件里的模型任务。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { complete } from './llm.js'
+import { decideLlm, readMode } from './llm-mode.js'
 import { createRegistry } from './parsers.js'
 import { catalogOf, ensureWiki, wikiRoot } from './store.js'
 import { ingest, lint, query } from './workflow.js'
@@ -74,14 +74,17 @@ export function apply(ctx) {
       text: { type: 'string', description: '直接给出的文本。与 path 二选一' },
       title: { type: 'string', description: '材料标题' },
       mediaType: { type: 'string', description: '媒体类型，例如 application/json 或 text/html' },
+      llm: { type: 'string', description: '用户已经选定的做法：dsh、key 或 off。没选过就不要代填，让插件直接问用户。' },
     },
     output: textOutput(),
     async execute(args, exec) {
+      const chosen = await choose(ctx, exec, 'wiki_ingest', args.llm)
+      if (!chosen.ok) return JSON.stringify(chosen)
       const result = await ingest({
         root: wikiRoot(),
         input: args,
         registry,
-        complete,
+        complete: chosen.complete,
         approve: (copy) => askApproval(ctx, exec, 'wiki_ingest', copy),
       })
       return JSON.stringify(result)
@@ -94,14 +97,17 @@ export function apply(ctx) {
     parameters: {
       question: { type: 'string', required: true, description: '要问的问题' },
       file: { type: 'boolean', description: '为 true 时把答案留下' },
+      llm: { type: 'string', description: '用户已经选定的做法：dsh、key 或 off。没选过就不要代填，让插件直接问用户。' },
     },
     output: textOutput(),
     async execute(args, exec) {
+      const chosen = await choose(ctx, exec, 'wiki_query', args.llm)
+      if (!chosen.ok) return JSON.stringify(chosen)
       const result = await query({
         root: wikiRoot(),
         question: args.question,
         file: args.file === true,
-        complete,
+        complete: chosen.complete,
         approve: (copy) => askApproval(ctx, exec, 'wiki_query', copy),
       })
       return JSON.stringify(result)
@@ -113,9 +119,16 @@ export function apply(ctx) {
     description: '检查断链、孤立页、不完整材料和矛盾指向。apply 为 true 时才修改已有页面，不新建，也不删除依据。',
     parameters: {
       apply: { type: 'boolean', description: '为 true 时提交修改' },
+      llm: { type: 'string', description: '用户已经选定的做法：dsh、key 或 off。只在 apply 为 true 且还没选过时需要。' },
     },
     output: textOutput(),
     async execute(args, exec) {
+      let complete
+      if (args.apply === true) {
+        const chosen = await choose(ctx, exec, 'wiki_lint', args.llm)
+        if (!chosen.ok) return JSON.stringify(chosen)
+        complete = chosen.complete
+      }
       const result = await lint({
         root: wikiRoot(),
         apply: args.apply === true,
@@ -125,6 +138,43 @@ export function apply(ctx) {
       return JSON.stringify(result)
     },
   }))
+
+  ctx.tools.register(defineTool({
+    name: 'wiki_llm',
+    description: '查看或更改插件里的模型任务怎么做：dsh 用 DSH 已有模型，key 用环境变量密钥，off 不做模型任务。更改前会再问一次用户。',
+    parameters: {
+      llm: { type: 'string', description: '要改成的做法：dsh、key 或 off。不传则只查看当前选择。' },
+    },
+    output: textOutput(),
+    async execute(args, exec) {
+      const root = wikiRoot()
+      ensureWiki(root)
+      if (args.llm == null || args.llm === '') return JSON.stringify({ ok: true, mode: readMode(root) || null })
+      const chosen = await decideLlm({
+        root,
+        llm: args.llm,
+        change: true,
+        agent: exec?.agent,
+        llmRuntime: ctx.get?.('llm'),
+        approve: (copy) => askApproval(ctx, exec, 'wiki_llm', copy),
+      })
+      if (!chosen.ok) return JSON.stringify(chosen)
+      return JSON.stringify({ ok: true, mode: chosen.mode })
+    },
+  }))
+}
+
+/** 摄入、提问和改写在调用模型前先选定做法。查阅类工具不走这里。 */
+async function choose(ctx, exec, tool, llm) {
+  const root = wikiRoot()
+  ensureWiki(root)
+  return decideLlm({
+    root,
+    llm,
+    agent: exec?.agent,
+    llmRuntime: ctx.get?.('llm'),
+    approve: (copy) => askApproval(ctx, exec, tool, copy),
+  })
 }
 
 /** 没有审批服务时返回 unavailable，调用方据此不写盘。 */

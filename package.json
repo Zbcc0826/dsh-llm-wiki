@@ -24,6 +24,7 @@
     "store.js",
     "patch.js",
     "llm.js",
+    "llm-mode.js",
     "embed.js",
     "retrieve.js",
     "workflow.js",

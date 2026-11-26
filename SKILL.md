@@ -13,4 +13,4 @@ description: 把材料维护成持续更新的知识维基。摄入、提问和�
 
 `wiki_read` 按 `种类/slug` 读一页。`wiki_status` 看页数和最近日志。`wiki_parsers` 看现在能解析什么。返回 `NO_PARSER` 时说明这个类型还没有解析器，不要假装已经读过。
 
-模型名用 `deepseek-v4-flash`。没有审批界面时工具返回 `NOT_APPROVED`，不要重试着写。
+要用模型时插件会问用户三选一：使用 DSH 里已有的模型（如 dsv4flash）、另提供环境变量 `DEEPSEEK_API_KEY` 或 `DEEPSEEK_KEY_FILE`、或不做插件里的模型任务。不要替用户选。用户已经说了之后，下一次调用再把 `llm` 设为 `dsh`、`key` 或 `off`。返回 `NEED_LLM_CHOICE` 时先把这三项原样告诉用户。返回 `LLM_OFF` 时不要改用别的方式偷偷调用模型。没有审批界面时写入返回 `NOT_APPROVED`，不要重试着写。

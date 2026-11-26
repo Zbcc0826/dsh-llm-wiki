@@ -13,7 +13,7 @@ DeepSeek Harness plugin that keeps a persistent wiki between you and the raw sou
 - DeepSeek Harness `0.2.2-rc.3` 或更高，且低于 `0.3.0`
 - 已能启动 `dsh` 或桌面应用
 - 桌面应用自带安装插件用的 pnpm，不必再装一个
-- 需要模型时设置 `DEEPSEEK_API_KEY`，或用 `DEEPSEEK_KEY_FILE` 指向密钥文件
+- 需要模型时，插件会先问：用 DSH 里已有的模型（如 dsv4flash）、另提供环境变量密钥，或不做插件里的模型任务
 
 ## 安装
 
@@ -54,8 +54,8 @@ node install.mjs
 
 内建类型：图像、markdown、纯文本、JSON、CSV、HTML。第一次查询会下载向量权重，缓存在插件目录的 `.cache`。下载失败就退回词面、目录和链接。
 
-需要模型时请求 `deepseek-v4-flash`。字面量 `dsv4.1flash` 会被接口拒绝，响应里的模型名通常是 `deepseek-flash`。
+需要模型时先问用户。选 DSH 时用当前会话里的模型，例如 dsv4flash。选密钥时才请求 `deepseek-v4-flash`；字面量 `dsv4.1flash` 会被接口拒绝，响应里的模型名通常是 `deepseek-flash`。选不做时，查阅和检查仍然可用，摄入和改写不会调用模型。
 
 ## 密钥
 
-不要把 API 密钥写进仓库。插件只读 `DEEPSEEK_API_KEY`，或 `DEEPSEEK_KEY_FILE` 指向的文件。
+不要把 API 密钥写进仓库。只有用户选择密钥时，插件才读 `DEEPSEEK_API_KEY`，或 `DEEPSEEK_KEY_FILE` 指向的文件。选择记在维基目录的 `llm.json`，里面没有密钥。要用 `wiki_llm` 改选择。
