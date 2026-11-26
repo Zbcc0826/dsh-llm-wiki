@@ -8,7 +8,7 @@ import { applyPatch, validateIngest, validateLint, validateQuery } from './patch
 import { extensionOf } from './parsers.js'
 import { presentSource } from './present.js'
 import { createRegistry } from './parsers.js'
-import { catalogOf, ensureWiki, SCHEMA_TEXT, writeRaw } from './store.js'
+import { appendLog, catalogOf, ensureWiki, hashBytes, SCHEMA_TEXT, writeRaw } from './store.js'
 import { defaultEmbedder } from './embed.js'
 import { retrieve } from './retrieve.js'
 
@@ -20,7 +20,7 @@ export const MAX_SOURCE_BYTES = 2_000_000
  */
 export async function ingest(options) {
   const loaded = loadSource(options.input ?? {})
-  if (!loaded.ok) return loaded
+  if (!loaded.ok) return observe(loaded)
   const registry = options.registry ?? createRegistry()
   const parsed = registry.parse({
     path: options.input.path,
@@ -28,34 +28,41 @@ export async function ingest(options) {
     bytes: loaded.bytes,
     mediaType: options.input.mediaType,
   })
-  if (!parsed.ok) return parsed
+  if (!parsed.ok) return observe(parsed)
   ensureWiki(options.root)
-  const raw = writeRaw(options.root, loaded.bytes, {
-    ext: loaded.ext,
-    title: options.input.title || parsed.title,
-    mediaType: parsed.mediaType,
-    parser: parsed.parser,
-    origin: options.input.path || '',
-  })
+  const title = options.input.title || parsed.title
+  const hash = hashBytes(loaded.bytes)
   const presented = presentSource(parsed, { maxChars: options.maxChars })
   const catalog = catalogOf(options.root)
-  const drafted = await askModel(options.complete, ingestMessages({
+  const messages = ingestMessages({
     schema: readSchema(options.root),
     catalog,
     presented,
-    hash: raw.hash,
-    title: options.input.title || parsed.title,
-  }))
-  if (!drafted.ok) return drafted
-  const checked = validateIngest(drafted.value, { hash: raw.hash, existing: existingMap(catalog.pages) })
-  if (!checked.ok) return checked
-  const title = options.input.title || parsed.title
+    hash,
+    title,
+  })
+  let drafted = await askModel(options.complete, messages)
+  if (!drafted.ok) return failAttempt(options, title, drafted)
+  let checked = validateIngest(drafted.value, { hash, existing: existingMap(catalog.pages) })
+  if (!checked.ok && checked.code === 'BAD_PATCH') {
+    drafted = await askModel(options.complete, repairMessages(messages, checked.message || 'BAD_PATCH', hash))
+    if (!drafted.ok) return failAttempt(options, title, drafted)
+    checked = validateIngest(drafted.value, { hash, existing: existingMap(catalog.pages) })
+  }
+  if (!checked.ok) return failAttempt(options, title, checked)
   const names = checked.pages.map((page) => `${page.kind}/${page.slug}`)
   const approved = await gate(options.approve, {
     zh: `把「${title}」写进知识维基，更新 ${names.join('、')}。原料不改。${presented.partial ? '材料没有完整交给模型。' : ''}`,
     en: `File "${title}" into the wiki: ${names.join(', ')}. Raw sources stay unchanged.${presented.partial ? ' The source was incomplete.' : ''}`,
   })
-  if (!approved.ok) return approved
+  if (!approved.ok) return failAttempt(options, title, approved)
+  const raw = writeRaw(options.root, loaded.bytes, {
+    ext: loaded.ext,
+    title,
+    mediaType: parsed.mediaType,
+    parser: parsed.parser,
+    origin: options.input.path || '',
+  })
   const now = options.now?.() ?? new Date()
   applyPatch(options.root, checked, {
     partial: presented.partial,
@@ -64,7 +71,7 @@ export async function ingest(options) {
     op: 'ingest',
     title,
   })
-  return { ok: true, hash: raw.hash, pages: names, partial: presented.partial, model: drafted.model }
+  return { ok: true, hash: raw.hash, pages: names, partial: presented.partial, model: drafted.model, approved: true, outcome: 'allowed-once' }
 }
 
 /**
@@ -120,7 +127,7 @@ export async function query(options) {
     zh: `把这个问题收成 ${filed.page.kind}/${filed.page.slug}。`,
     en: `File this answer as ${filed.page.kind}/${filed.page.slug}.`,
   })
-  if (!approved.ok) return { ...approved, answer, citations, hits: result.hits, conflicts: result.conflicts }
+  if (!approved.ok) return { ...approved, answer, citations, hits: result.hits, conflicts: result.conflicts, approved: false }
   const now = options.now?.() ?? new Date()
   applyPatch(options.root, { pages: [filed.page], summary: filed.page.summary }, {
     partial: false,
@@ -129,7 +136,7 @@ export async function query(options) {
     op: 'query',
     title: filed.page.title,
   })
-  return { ...result, filed: `${filed.page.kind}/${filed.page.slug}` }
+  return { ...result, filed: `${filed.page.kind}/${filed.page.slug}`, approved: true, outcome: 'allowed-once' }
 }
 
 /**
@@ -139,17 +146,20 @@ export async function lint(options) {
   ensureWiki(options.root)
   const catalog = catalogOf(options.root)
   const local = localFindings(catalog.pages)
+  if (catalog.pages.length === 0) {
+    return { ok: false, code: 'EMPTY_WIKI', findings: [{ code: 'EMPTY_WIKI', message: '无页面可检查' }], applied: false }
+  }
   if (options.apply !== true) return { ok: true, findings: local, applied: false }
   const drafted = await askModel(options.complete, lintMessages(readSchema(options.root), catalog, local))
-  if (!drafted.ok) return { ...drafted, findings: local }
+  if (!drafted.ok) return { ...observe(drafted), findings: local }
   const checked = validateLint(drafted.value, { existing: existingMap(catalog.pages) })
-  if (!checked.ok) return { ...checked, findings: local }
+  if (!checked.ok) return { ...observe(checked), findings: local }
   const names = checked.pages.map((page) => `${page.kind}/${page.slug}`)
   const approved = await gate(options.approve, {
     zh: `按体检结果修改 ${names.join('、')}。不新建页面，也不删除依据。`,
     en: `Apply the lint to ${names.join(', ')}. No new pages and no dropped sources.`,
   })
-  if (!approved.ok) return { ...approved, findings: local }
+  if (!approved.ok) return { ...approved, findings: local, approved: false }
   const previous = existingMap(catalog.pages)
   checked.pages = checked.pages.map((page) => ({
     ...page,
@@ -163,7 +173,7 @@ export async function lint(options) {
     op: 'lint',
     title: '体检',
   })
-  return { ok: true, findings: local, pages: names, applied: true, model: drafted.model }
+  return { ok: true, findings: local, pages: names, applied: true, model: drafted.model, approved: true, outcome: 'allowed-once' }
 }
 
 /** 不调用模型也能看出的问题。 */
@@ -193,16 +203,35 @@ async function askModel(complete, messages) {
   const result = await complete(messages)
   if (!result?.ok) return result ?? { ok: false, code: 'NO_MODEL' }
   const value = extractJson(result.text)
-  if (!value) return { ok: false, code: 'BAD_PATCH' }
+  if (!value) return { ok: false, code: 'BAD_PATCH', message: String(result.text ?? '').slice(0, 400) }
   return { ok: true, value, model: result.model }
 }
 
 async function gate(approve, copy) {
-  if (typeof approve !== 'function') return { ok: false, code: 'NOT_APPROVED', outcome: 'unavailable' }
+  if (typeof approve !== 'function') return { ok: false, code: 'NOT_APPROVED', approved: false, outcome: 'unavailable' }
   let outcome = 'unavailable'
   try { outcome = await approve(copy) } catch { outcome = 'unavailable' }
-  if (outcome !== 'allowed-once') return { ok: false, code: 'NOT_APPROVED', outcome }
-  return { ok: true }
+  if (outcome !== 'allowed-once') return { ok: false, code: 'NOT_APPROVED', approved: false, outcome }
+  return { ok: true, approved: true, outcome: 'allowed-once' }
+}
+
+/** 还没问过能不能写时，把结果标成未批准。 */
+function observe(result) {
+  if (result.approved !== undefined) return result
+  return { ...result, approved: false, outcome: result.outcome ?? 'not-asked' }
+}
+
+/** 模型、校验或批准失败时只记日志，不写原料。 */
+function failAttempt(options, title, result) {
+  const now = options.now?.() ?? new Date()
+  const message = typeof result.message === 'string' ? result.message.slice(0, 200) : ''
+  appendLog(options.root, {
+    date: day(now),
+    op: 'ingest',
+    title,
+    detail: `失败 ${result.code ?? 'FAILED'}${message ? ` ${message}` : ''}`,
+  })
+  return observe(result)
 }
 
 function loadSource(input) {
@@ -235,6 +264,17 @@ function readSchema(root) {
   try { return readFileSync(`${root}/schema.md`, 'utf8') } catch { return SCHEMA_TEXT }
 }
 
+/** 第一次补丁缺字段时，把缺什么和必须带上的哈希再交给模型一次。 */
+function repairMessages(messages, reason, hash) {
+  return [
+    ...messages,
+    {
+      role: 'user',
+      content: `上一份补丁不合格：${reason}。每页必须有 summary（1到200字）和 body。sources 必须包含 ${hash}。不要写 query 页。只返回一个 JSON 对象。`,
+    },
+  ]
+}
+
 function ingestMessages({ schema, catalog, presented, hash, title }) {
   const payload = JSON.stringify({
     task: 'ingest',
@@ -246,7 +286,7 @@ function ingestMessages({ schema, catalog, presented, hash, title }) {
     source: presented.text,
   })
   return [
-    { role: 'system', content: `${schema}\n只返回一个 JSON 对象。图像里的数字和文字也要写进页面。每页带 aliases（读者以后会拿来查找的词，包括正文没写但读者会用的常见叫法，最多 8 个，没有把握就少写）和 claims（原子主张，最多 8 条）。更新已有页时，原来的 aliases 和 claims 必须保留。` },
+    { role: 'system', content: `${schema}\n只返回一个 JSON 对象。图像里的数字和文字也要写进页面。每页必须有 summary，sources 必须包含给出的 hash。每页带 aliases（读者以后会拿来查找的词，包括正文没写但读者会用的常见叫法，最多 8 个，没有把握就少写）和 claims（原子主张，最多 8 条）。更新已有页时，原来的 aliases 和 claims 必须保留。` },
     { role: 'user', content: withImages(payload, presented.images) },
   ]
 }

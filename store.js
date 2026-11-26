@@ -2,7 +2,7 @@
  * 维基目录。原料只增不改，索引由页面头重建，日志只追加。
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { KINDS, readPages, writePage } from './pages.js'
@@ -36,10 +36,15 @@ export function ensureWiki(root) {
   if (!existsSync(path.join(root, 'log.md'))) writeFileSync(path.join(root, 'log.md'), '# 日志\n')
 }
 
+/** 原料内容的哈希。写入前就能算，失败时不必先落盘。 */
+export function hashBytes(bytes) {
+  return createHash('sha256').update(Buffer.from(bytes)).digest('hex')
+}
+
 /** 按内容哈希保存原料。相同内容不重写。 */
 export function writeRaw(root, bytes, meta) {
   const buffer = Buffer.from(bytes)
-  const hash = createHash('sha256').update(buffer).digest('hex')
+  const hash = hashBytes(buffer)
   const ext = safeExt(meta.ext)
   const file = path.join(root, 'raw', `${hash}${ext}`)
   if (!existsSync(file)) writeFileSync(file, buffer)
@@ -115,6 +120,31 @@ export function appendLog(root, entry) {
   const previous = existsSync(file) ? readFileSync(file, 'utf8') : '# 日志\n'
   const body = previous.endsWith('\n') ? previous : `${previous}\n`
   writeFileSync(file, `${body}\n## [${entry.date}] ${entry.op} | ${entry.title}\n${entry.detail}\n`)
+}
+
+/**
+ * 列出没有任何页面引用的原料。失败的摄入不再留下这种文件，旧残留仍能在这里看见。
+ */
+export function orphansOf(root) {
+  const rawDir = path.join(root, 'raw')
+  let names = []
+  try { names = readdirSync(rawDir) } catch { return [] }
+  let cited = new Set()
+  try {
+    cited = new Set(readPages(root).pages.flatMap((page) => page.sources ?? []))
+  } catch {
+    cited = new Set()
+  }
+  const orphans = []
+  for (const name of names) {
+    if (!name.endsWith('.meta.json')) continue
+    const hash = name.slice(0, -'.meta.json'.length)
+    if (cited.has(hash)) continue
+    let meta = {}
+    try { meta = JSON.parse(readFileSync(path.join(rawDir, name), 'utf8')) } catch { meta = {} }
+    orphans.push({ hash, title: meta.title || '', file: meta.file || '' })
+  }
+  return orphans
 }
 
 /** 给模型看的目录，只含标识和一句摘要。 */

@@ -54,7 +54,7 @@ node install.mjs
 
 内建类型：图像、markdown、纯文本、JSON、CSV、HTML。第一次查询会下载向量权重，缓存在插件目录的 `.cache`。下载失败就退回词面、目录和链接。
 
-需要模型时先问用户。选 DSH 时用当前会话里的模型，例如 dsv4flash。选密钥时才请求 `deepseek-v4-flash`；字面量 `dsv4.1flash` 会被接口拒绝，响应里的模型名通常是 `deepseek-flash`。选不做时，查阅和检查仍然可用，摄入和改写不会调用模型。
+还没选定做法时，摄入和提问返回 `NEED_LLM_CHOICE`，不会写 `llm.json`，也不会先把原料存下来。显式传入的 `llm` 会覆盖已记住的做法并立刻生效。`wiki_llm` 更改仍会再确认一次。选 DSH 时用当前会话里的模型，例如 dsv4flash，消息按文本块发送。选密钥时才请求 `deepseek-v4-flash`；字面量 `dsv4.1flash` 会被接口拒绝，响应里的模型名通常是 `deepseek-flash`。选不做时，查阅和检查仍然可用，摄入在写盘前就返回 `LLM_OFF`。失败记在 `log.md`。`wiki_status` 的 `orphans` 列出没有页面引用的原料。写入结果带 `approved` 和 `outcome`。
 
 ## 密钥
 

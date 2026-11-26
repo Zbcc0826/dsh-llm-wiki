@@ -109,10 +109,10 @@ function checkCommon(patch, maxPages) {
 
 function checkPage(page) {
   if (!page || typeof page !== 'object') return { ok: false, code: 'BAD_PATCH' }
-  if (!validKind(page.kind) || !validSlug(page.slug)) return { ok: false, code: 'BAD_PATCH' }
-  if (typeof page.title !== 'string' || page.title.length < 1 || page.title.length > 120) return { ok: false, code: 'BAD_PATCH' }
-  if (typeof page.summary !== 'string' || page.summary.length < 1 || page.summary.length > 200) return { ok: false, code: 'BAD_PATCH' }
-  if (typeof page.body !== 'string' || page.body.length < 1 || page.body.length > 8000) return { ok: false, code: 'BAD_PATCH' }
+  if (!validKind(page.kind) || !validSlug(page.slug)) return { ok: false, code: 'BAD_PATCH', message: 'slug' }
+  if (typeof page.title !== 'string' || page.title.length < 1 || page.title.length > 120) return { ok: false, code: 'BAD_PATCH', message: 'title' }
+  if (typeof page.summary !== 'string' || page.summary.length < 1 || page.summary.length > 200) return { ok: false, code: 'BAD_PATCH', message: 'summary' }
+  if (typeof page.body !== 'string' || page.body.length < 1 || page.body.length > 8000) return { ok: false, code: 'BAD_PATCH', message: 'body' }
   const contradicts = unique(page.contradicts)
   if (contradicts.some((item) => !CITE.test(item))) return { ok: false, code: 'BAD_PATCH', message: 'contradicts' }
   const cites = unique(page.cites)

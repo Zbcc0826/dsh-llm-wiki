@@ -56,39 +56,29 @@ export function llmChoice() {
 }
 
 /**
- * 决定这次用哪种模型。已记住的选择直接沿用。
- * 没有选择时先问要不要用 DSH 模型；拒绝后再问要不要用环境变量密钥；再拒绝就记为不做。
- * 调用方如果已经带回用户说的 dsh、key 或 off，只再确认一次。
+ * 决定这次用哪种模型。
+ * 没有记下的选择、调用方也没带来用户的选择时，只返回三种做法，不写 llm.json。
+ * 显式传入的 dsh、key 或 off 优先于已记住的选择。
+ * 摄入和提问上的参数是用户已经做过的选择，直接记住。
+ * 只有 wiki_llm 这种更改会再请一次批准。
  */
 export async function decideLlm(options) {
   const saved = readMode(options.root)
-  if (saved && !options.change) return ready(saved, options)
-  if (options.llm != null) {
-    if (!LLM_MODES.includes(options.llm)) return { ok: false, code: 'BAD_LLM_MODE' }
-    if (options.llm === saved) return ready(saved, options)
-    const outcome = await options.approve(confirm(options.llm))
-    if (outcome !== 'allowed-once') return { ok: false, code: 'NOT_APPROVED', outcome: outcome || 'unavailable' }
-    writeMode(options.root, options.llm)
-    return ready(options.llm, options)
+  const requested = options.llm == null || options.llm === '' ? '' : options.llm
+  if (requested) {
+    if (!LLM_MODES.includes(requested)) return { ok: false, code: 'BAD_LLM_MODE', approved: false, outcome: 'not-asked' }
+    if (requested === saved) return ready(saved, options)
+    if (options.change) {
+      const outcome = await options.approve(confirm(requested))
+      if (outcome !== 'allowed-once') {
+        return { ok: false, code: 'NOT_APPROVED', approved: false, outcome: outcome || 'unavailable' }
+      }
+    }
+    writeMode(options.root, requested)
+    return { ...ready(requested, options), approved: options.change === true, outcome: options.change ? 'allowed-once' : 'argument' }
   }
-  const dsh = await options.approve(askDsh())
-  if (dsh === 'allowed-once') {
-    writeMode(options.root, 'dsh')
-    return ready('dsh', options)
-  }
-  if (dsh === 'cancelled' || dsh === 'unavailable' || !dsh) {
-    return { ...llmChoice(), outcome: dsh || 'unavailable' }
-  }
-  const key = await options.approve(askKey())
-  if (key === 'allowed-once') {
-    writeMode(options.root, 'key')
-    return ready('key', options)
-  }
-  if (key === 'cancelled' || key === 'unavailable' || !key) {
-    return { ...llmChoice(), outcome: key || 'unavailable' }
-  }
-  writeMode(options.root, 'off')
-  return ready('off', options)
+  if (saved) return ready(saved, options)
+  return { ...llmChoice(), approved: false, outcome: 'not-asked' }
 }
 
 /** 按做法返回 complete。off 不访问网络，只让调用方知道模型任务停了。 */
@@ -105,35 +95,54 @@ export function completeFor(mode, options = {}) {
 export async function completeWithDsh(llm, agent, messages, options = {}) {
   if (typeof llm?.stream !== 'function') return { ok: false, code: 'NO_DSH_MODEL' }
   const route = await dshRoute(llm, agent)
-  if (!route) return { ok: false, code: 'NO_DSH_MODEL' }
+  if (!route) return { ok: false, code: 'NO_DSH_MODEL', provider: undefined, model: undefined }
   const prepared = splitMessages(messages)
   let text = ''
-  let incomplete = false
-  let failed = false
+  let finishReason
   try {
     const stream = llm.stream({
       provider: route.provider,
       model: route.model,
+      reasoningEffort: options.reasoningEffort ?? 'off',
       system: prepared.system || undefined,
       messages: prepared.messages,
       maxTokens: options.maxTokens ?? 4096,
     })
     for await (const chunk of stream) {
       if (chunk?.type === 'text-delta' && chunk.text) text += chunk.text
-      if (chunk?.type === 'finish') {
-        const kind = chunk.reason?.kind
-        if (kind === 'error' || kind === 'aborted') failed = true
-        if (kind === 'max-tokens') incomplete = true
-      }
+      if (chunk?.type === 'finish') finishReason = chunk.reason
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'UPSTREAM'
-    return { ok: false, code: 'UPSTREAM', message: String(message).slice(0, 300) }
+    return upstream(route, {
+      finishReason: { kind: 'error', message: error instanceof Error ? error.message : 'UPSTREAM' },
+      message: error instanceof Error ? error.message : 'UPSTREAM',
+    })
   }
-  if (failed) return { ok: false, code: 'UPSTREAM', message: 'DSH 模型没有完成' }
-  if (!text.trim()) return { ok: false, code: 'EMPTY_MODEL' }
-  if (incomplete) return { ok: false, code: 'INCOMPLETE', model: route.model }
-  return { ok: true, text, model: route.model }
+  const kind = finishReason?.kind
+  if (kind === 'error' || kind === 'aborted') {
+    const failure = finishReason.failure ?? {}
+    return upstream(route, {
+      finishReason,
+      upstreamStatus: failure.status,
+      message: failure.message || failure.code || kind,
+    })
+  }
+  if (!text.trim()) return { ...upstream(route, { finishReason, message: '模型没有返回正文' }), code: 'EMPTY_MODEL' }
+  if (kind === 'max-tokens') return { ok: false, code: 'INCOMPLETE', provider: route.provider, model: route.model, finishReason }
+  return { ok: true, text, provider: route.provider, model: route.model }
+}
+
+/** 失败时保留路由和结束原因，方便判断是权限、参数还是上游状态。 */
+function upstream(route, extra) {
+  return {
+    ok: false,
+    code: 'UPSTREAM',
+    provider: route.provider,
+    model: route.model,
+    finishReason: extra.finishReason,
+    upstreamStatus: extra.upstreamStatus,
+    message: String(extra.message ?? '').slice(0, 300),
+  }
 }
 
 /** 优先用当前会话正在用的模型，否则在宿主目录里找名称里带 flash 的模型。 */
@@ -157,16 +166,35 @@ async function dshRoute(llm, agent) {
   return ranked.find((item) => /flash/i.test(`${item.model} ${item.name}`)) || ranked[0] || null
 }
 
-/** 把系统消息交给宿主的 system 槽，其余消息原样保留，图片块也不会被拆掉。 */
+/**
+ * 把系统消息交给宿主的 system 槽。
+ * 用户消息必须是文本块数组；纯字符串会被适配器当成非法内容。
+ * DSH 这条路认的是附件引用，不是密钥接口的 image_url，像素改走密钥模式。
+ */
 function splitMessages(messages) {
   const system = []
   const rest = []
   for (const message of messages ?? []) {
     if (message?.role === 'system' && typeof message.content === 'string') system.push(message.content)
-    else if (message) rest.push(message)
+    else if (message) rest.push({ role: message.role === 'assistant' ? 'assistant' : 'user', content: toBlocks(message.content) })
   }
-  if (rest.length === 0) rest.push({ role: 'user', content: '请继续。' })
+  if (rest.length === 0) rest.push({ role: 'user', content: [{ type: 'text', text: '请继续。' }] })
   return { system: system.join('\n'), messages: rest }
+}
+
+/** 收成宿主能序列化的文本块。图像像素不在这里发送。 */
+function toBlocks(content) {
+  if (typeof content === 'string') return [{ type: 'text', text: content || '请继续。' }]
+  if (!Array.isArray(content)) return [{ type: 'text', text: String(content ?? '请继续。') }]
+  const blocks = []
+  let images = 0
+  for (const block of content) {
+    if (block?.type === 'text' && block.text) blocks.push({ type: 'text', text: block.text })
+    else if (block?.type === 'image_url' || block?.type === 'image') images += 1
+  }
+  if (images > 0) blocks.push({ type: 'text', text: `有 ${images} 张图像没能交给 DSH 模型。需要看像素时请改用密钥模式。` })
+  if (blocks.length === 0) blocks.push({ type: 'text', text: '请继续。' })
+  return blocks
 }
 
 function ready(mode, options) {

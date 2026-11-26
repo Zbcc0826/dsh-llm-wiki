@@ -50,7 +50,7 @@ If there is no approval UI, a write returns `NOT_APPROVED` and does not hang.
 
 The first query downloads the embedding weights into the plugin `.cache` directory. If that download fails, retrieval continues with words, the catalog, and links.
 
-A model call asks first. DSH mode uses the model already selected in the session, such as dsv4flash. Key mode requests `deepseek-v4-flash`; the literal id `dsv4.1flash` is rejected, and the response usually reports `deepseek-flash`. Skipping model tasks leaves reading and checks available; ingest and rewrites do not call a model.
+Before a mode is chosen, ingest and query return `NEED_LLM_CHOICE` and write neither `llm.json` nor raw material. An explicit `llm` argument overrides the saved mode and takes effect immediately. `wiki_llm` still asks before changing it. DSH mode uses the model already selected in the session, such as dsv4flash, and sends text blocks. Key mode requests `deepseek-v4-flash`; the literal id `dsv4.1flash` is rejected, and the response usually reports `deepseek-flash`. Skipping model tasks leaves reading and checks available; ingest returns `LLM_OFF` before anything is stored. Failures are appended to `log.md`. `wiki_status.orphans` lists raw files that no page cites. Write results include `approved` and `outcome`.
 
 ## Keys
 

@@ -8,7 +8,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { decideLlm, readMode } from './llm-mode.js'
 import { createRegistry } from './parsers.js'
-import { catalogOf, ensureWiki, wikiRoot } from './store.js'
+import { catalogOf, ensureWiki, orphansOf, wikiRoot } from './store.js'
 import { ingest, lint, query } from './workflow.js'
 
 export const name = 'llm-wiki'
@@ -34,6 +34,7 @@ export function apply(ctx) {
         pages: catalog.total,
         truncated: catalog.truncated,
         broken: catalog.broken,
+        orphans: orphansOf(root),
         parsers: registry.list(),
         recent: recentLog(root),
       })
@@ -195,17 +196,19 @@ async function askApproval(ctx, exec, tool, copy) {
 }
 
 function registerSkill(ctx) {
+  const skills = ctx.get?.('skills')
+  if (!skills?.register) return
   try {
-    const skills = ctx.get?.('skills')
-    if (!skills?.register) return
     const file = path.join(path.dirname(fileURLToPath(import.meta.url)), 'SKILL.md')
     const raw = readFileSync(file, 'utf8')
     const description = raw.match(/^description:\s*(.+)$/m)?.[1]?.trim()
     const content = raw.replace(/^---[\s\S]*?---\n/, '')
-    if (!description || !content.trim()) return
-    skills.register({ name: 'llm-wiki', description, content })
-  } catch {
-    // 没有技能服务时，工具仍然可用。
+    if (!description || !content.trim()) throw new Error('SKILL.md 缺少 description 或正文')
+    skills.register({ name: 'llm-wiki', description, content, source: 'runtime' })
+  } catch (error) {
+    const message = `llm-wiki 技能注册失败：${error instanceof Error ? error.message : error}`
+    if (typeof ctx.logger?.warn === 'function') ctx.logger.warn(message)
+    else console.warn(message)
   }
 }
 

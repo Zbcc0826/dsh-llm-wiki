@@ -2,7 +2,7 @@
  * 解析、补丁和写入。不访问网络，不读真实密钥。
  */
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -13,7 +13,7 @@ import { validateIngest } from './patch.js'
 import { presentSource } from './present.js'
 import { hitsAtK, retrieve } from './retrieve.js'
 import { EMBED_MODEL, createEmbedder } from './embed.js'
-import { rebuildIndex, wikiRoot } from './store.js'
+import { orphansOf, rebuildIndex, wikiRoot } from './store.js'
 import { ingest, lint, localFindings, query } from './workflow.js'
 
 test('解析器区分文本、表格、JSON、HTML，不认识的类型不假装成功', () => {
@@ -82,7 +82,10 @@ test('摄入在批准后写页面和日志，拒绝或坏补丁不落盘', async
     approve: async () => 'deny',
   })
   assert.equal(refused.code, 'NOT_APPROVED')
+  assert.equal(refused.approved, false)
+  assert.equal(refused.outcome, 'deny')
   assert.equal(existsSync(path.join(root, 'pages', 'source', 'river.md')), false)
+  assert.equal(readdirSync(path.join(root, 'raw')).length, 0)
 
   const broken = await ingest({
     root,
@@ -102,6 +105,8 @@ test('摄入在批准后写页面和日志，拒绝或坏补丁不落盘', async
     approve: async () => 'allowed-once',
   })
   assert.equal(saved.ok, true)
+  assert.equal(saved.approved, true)
+  assert.equal(saved.outcome, 'allowed-once')
   assert.equal(saved.pages[0], 'source/river')
   const page = parsePage(readFileSync(path.join(root, 'pages', 'source', 'river.md'), 'utf8'))
   assert.equal(page.sources[0], saved.hash)
@@ -269,29 +274,72 @@ test('插件入口注册七个工具', async () => {
 test('使用模型前先问用户，选定后记住', async () => {
   const { decideLlm, readMode } = await import('./llm-mode.js')
   const root = tempWiki()
-  const asks = []
   const pending = await decideLlm({
     root,
-    approve: async (copy) => {
-      asks.push(copy.zh)
-      return 'unavailable'
-    },
+    approve: async () => { throw new Error('还没选择，不应询问') },
   })
   assert.equal(pending.code, 'NEED_LLM_CHOICE')
   assert.deepEqual(pending.choices.map((item) => item.id), ['dsh', 'key', 'off'])
   assert.equal(readMode(root), '')
-  assert.match(asks[0], /dsv4flash/)
+  assert.equal(existsSync(path.join(root, 'llm.json')), false)
 
   const off = await decideLlm({
     root,
-    approve: async () => 'rejected',
+    llm: 'off',
+    approve: async (copy) => {
+      assert.match(copy.zh, /不做插件里的模型任务/)
+      return 'allowed-once'
+    },
   })
   assert.equal(off.mode, 'off')
+  assert.equal(off.outcome, 'argument')
   assert.equal(readMode(root), 'off')
   assert.deepEqual(await off.complete([{ role: 'user', content: 'hi' }]), { ok: false, code: 'LLM_OFF' })
 
   const again = await decideLlm({ root, approve: async () => { throw new Error('不应再问') } })
   assert.equal(again.mode, 'off')
+
+  const switched = await decideLlm({
+    root,
+    llm: 'dsh',
+    approve: async () => { throw new Error('工具参数里的选择不再另问') },
+  })
+  assert.equal(switched.mode, 'dsh')
+  assert.equal(readMode(root), 'dsh')
+  const stayed = await decideLlm({
+    root,
+    llm: 'off',
+    change: true,
+    approve: async () => 'rejected',
+  })
+  assert.equal(stayed.code, 'NOT_APPROVED')
+  assert.equal(stayed.approved, false)
+  assert.equal(readMode(root), 'dsh')
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('缺字段的补丁会再要一次，通过后才落盘', async () => {
+  const root = tempWiki()
+  let calls = 0
+  const saved = await ingest({
+    root,
+    input: { text: '# 河\n\n向东', title: '河' },
+    now: () => new Date('2026-11-25T00:00:00.000Z'),
+    complete: async (messages) => {
+      calls += 1
+      const hash = JSON.parse(messages.find((item) => item.role === 'user').content).hash
+      if (calls === 1) {
+        return { ok: true, model: 'deepseek-flash', text: JSON.stringify({ pages: [{ kind: 'source', slug: 'river', title: '河', body: '向东。' }] }) }
+      }
+      assert.match(messages.at(-1).content, /summary/)
+      return { ok: true, model: 'deepseek-flash', text: JSON.stringify({ summary: '记下河流', pages: [{ kind: 'source', slug: 'river', title: '河', summary: '向东', body: '河向东。', sources: [hash] }] }) }
+    },
+    approve: async () => 'allowed-once',
+  })
+  assert.equal(calls, 2)
+  assert.equal(saved.ok, true)
+  assert.equal(existsSync(path.join(root, 'pages', 'source', 'river.md')), true)
+  rmSync(root, { recursive: true, force: true })
 })
 
 test('用户指定用 DSH 模型时走当前会话，不读密钥', async () => {
@@ -322,8 +370,78 @@ test('用户指定用 DSH 模型时走当前会话，不读密钥', async () => 
   assert.equal(result.model, 'dsv4flash')
   assert.equal(seen.provider, 'deepseek')
   assert.equal(seen.model, 'dsv4flash')
+  assert.equal(seen.reasoningEffort, 'off')
   assert.equal(seen.system, '只返回 JSON')
-  assert.equal(seen.messages.length, 1)
+  assert.equal(seen.messages[0].content[0].type, 'text')
+  assert.equal(seen.messages[0].content[0].text, '你好')
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('DSH 失败带回路由和结束原因', async () => {
+  const { completeWithDsh } = await import('./llm-mode.js')
+  const result = await completeWithDsh({
+    async *stream() {
+      yield {
+        type: 'finish',
+        reason: { kind: 'error', failure: { message: '缺少权限', code: 'FORBIDDEN', status: 403 } },
+      }
+    },
+  }, { model: { current: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) } }, [
+    { role: 'user', content: '你好' },
+  ])
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'UPSTREAM')
+  assert.equal(result.provider, 'deepseek-account')
+  assert.equal(result.model, 'deepseek-flash')
+  assert.equal(result.upstreamStatus, 403)
+  assert.equal(result.finishReason.failure.code, 'FORBIDDEN')
+  assert.equal(result.message.includes('没有完成'), false)
+})
+
+test('模型失败不写原料，日志和孤儿清单仍能看见', async () => {
+  const root = tempWiki()
+  const failed = await ingest({
+    root,
+    input: { text: '不会留下', title: '失败材料' },
+    now: () => new Date('2026-11-25T00:00:00.000Z'),
+    complete: async () => ({ ok: false, code: 'LLM_OFF' }),
+    approve: async () => 'allowed-once',
+  })
+  assert.equal(failed.code, 'LLM_OFF')
+  assert.equal(failed.approved, false)
+  assert.equal(failed.outcome, 'not-asked')
+  assert.equal(readdirSync(path.join(root, 'raw')).length, 0)
+  assert.match(readFileSync(path.join(root, 'log.md'), 'utf8'), /失败 LLM_OFF/)
+  writeFileSync(path.join(root, 'raw', 'abc.meta.json'), `${JSON.stringify({ hash: 'abc', title: '旧残留', file: 'abc.md' })}\n`)
+  writeFileSync(path.join(root, 'raw', 'abc.md'), '旧残留')
+  assert.equal(orphansOf(root)[0].title, '旧残留')
+  const empty = await lint({ root })
+  assert.equal(empty.code, 'EMPTY_WIKI')
+  assert.equal(empty.findings[0].message, '无页面可检查')
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('技能注册传 source，失败时留下警告', async () => {
+  if (!existsSync(path.resolve('node_modules/@deepseek-ai/dsh-tools/package.json'))) return
+  const loaded = await import('./index.js')
+  let registered
+  loaded.apply({
+    tools: { register() {} },
+    get(name) { return name === 'skills' ? { register(skill) { registered = skill } } : null },
+  })
+  assert.equal(registered.name, 'llm-wiki')
+  assert.equal(registered.source, 'runtime')
+  assert.equal(typeof registered.content, 'string')
+  assert.equal(registered.content.includes('NEED_LLM_CHOICE'), true)
+  const warnings = []
+  loaded.apply({
+    tools: { register() {} },
+    logger: { warn(message) { warnings.push(message) } },
+    get(name) {
+      return name === 'skills' ? { register() { throw new Error('source must be a string') } } : null
+    },
+  })
+  assert.match(warnings[0], /技能注册失败/)
 })
 
 function tempWiki() {
