@@ -383,6 +383,86 @@ test('非法 slug 按标题转写，BAD_PATCH 带回值和规则', async () => {
   rmSync(root, { recursive: true, force: true })
 })
 
+test('同一实体按标题或别名复用已有 slug，句子型矛盾改写成页标识', async () => {
+  const oldHash = 'a'.repeat(64)
+  const hash = 'b'.repeat(64)
+  const existing = new Map([
+    ['entity/xingqiao-tech', {
+      kind: 'entity', slug: 'xingqiao-tech', title: '星桥科技', summary: '公司', body: '做光学。',
+      aliases: ['Xingqiao Tech'], claims: ['2015 年成立'], relations: [], contradicts: [], sources: [oldHash],
+    }],
+    ['source/alt-record', {
+      kind: 'source', slug: 'alt-record', title: '内部纪要', summary: '另一说', body: '2017 年。',
+      aliases: [], claims: [], relations: [], contradicts: [], sources: [oldHash],
+    }],
+  ])
+  const checked = validateIngest({
+    summary: '补材料',
+    pages: [{
+      kind: '',
+      slug: 'xing-qiao-ke-ji',
+      title: '星桥科技',
+      summary: '另一说',
+      body: '见 [[entity/xing-qiao-ke-ji]]。',
+      contradicts: ['内部纪要称成立于 2017 年。'],
+      sources: [hash],
+      update: true,
+    }],
+  }, { hash, existing })
+  assert.equal(checked.ok, true, JSON.stringify(checked))
+  assert.equal(checked.pages[0].kind, 'entity')
+  assert.equal(checked.pages[0].slug, 'xingqiao-tech')
+  assert.deepEqual(checked.pages[0].sources, [oldHash, hash])
+  assert.deepEqual(checked.pages[0].contradicts, ['source/alt-record'])
+  assert.match(checked.pages[0].body, /\[\[entity\/xingqiao-tech\]\]/)
+  const byAlias = validateIngest({
+    summary: '英文别名',
+    pages: [{
+      kind: 'entity', slug: 'xingqiao', title: 'Xingqiao Tech', summary: '英文材料', body: '提到这家公司。',
+      sources: [hash], update: true,
+    }],
+  }, { hash, existing })
+  assert.equal(byAlias.pages[0].slug, 'xingqiao-tech')
+
+  const root = tempWiki()
+  writePage(root, {
+    kind: 'entity', slug: 'xingqiao-tech', title: '星桥科技', summary: '公司', body: '做光学。',
+    sources: [oldHash], aliases: ['Xingqiao Tech'], claims: [], contradicts: [], relations: [],
+    updated: '2026-11-25T00:00:00.000Z',
+  })
+  let prompt = ''
+  const saved = await ingest({
+    root,
+    input: { text: '星桥科技另有一说。', title: '星桥科技' },
+    now: () => new Date('2026-11-26T00:00:00.000Z'),
+    approve: async () => 'allowed-once',
+    complete: async (messages) => {
+      prompt = messages[0].content
+      const sourceHash = JSON.parse(messages.at(-1).content).hash
+      return {
+        ok: true,
+        model: 'deepseek-flash',
+        text: JSON.stringify({
+          summary: '补一说',
+          pages: [{
+            kind: 'entity', slug: 'xing-qiao-ke-ji', title: '星桥科技', summary: '另一说', body: '见 [[entity/xing-qiao-ke-ji]]。',
+            sources: [sourceHash], update: true,
+          }],
+        }),
+      }
+    },
+  })
+  assert.equal(saved.ok, true, JSON.stringify(saved))
+  assert.match(prompt, /entity\/xingqiao-tech/)
+  assert.match(prompt, /必须复用/)
+  assert.match(prompt, /contradicts 每项必须是种类\/slug/)
+  const stored = readPages(root).pages.find((page) => page.kind === 'entity')
+  assert.equal(stored.slug, 'xingqiao-tech')
+  assert.equal(stored.sources.length, 2)
+  assert.equal(readPages(root).pages.some((page) => page.slug === 'xing-qiao-ke-ji'), false)
+  rmSync(root, { recursive: true, force: true })
+})
+
 test('摄入在批准后写页面和日志，拒绝或坏补丁不落盘', async () => {
   const root = tempWiki()
   const now = () => new Date('2026-11-25T00:00:00.000Z')

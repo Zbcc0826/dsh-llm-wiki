@@ -479,7 +479,7 @@ function repairMessages(messages, reason, hash) {
     ...messages,
     {
       role: 'user',
-      content: `上一份补丁不合格：${detail}。每页必须有 summary（1到200字）和 body。sources 必须包含 ${hash}。relations 每条写成「谓语 目标页」。slug 必须匹配 ^[a-z0-9]+(?:-[a-z0-9]+)*$。不要写 query 页。只返回一个 JSON 对象。`,
+      content: `上一份补丁不合格：${detail}。kind 必填，只能是 source、entity、event、concept。每页必须有 summary（1到200字）和 body。sources 必须包含 ${hash}。contradicts 每项必须是种类/slug，不能写句子。relations 每条写成「谓语 目标页」。已有页面必须复用目录里的 slug，并写 update:true。slug 必须匹配 ^[a-z0-9]+(?:-[a-z0-9]+)*$。不要写 query 页。只返回一个 JSON 对象。`,
     },
   ]
 }
@@ -499,9 +499,20 @@ function ingestMessages({ schema, catalog, presented, hash, title, segment }) {
     ? `这是同一份材料的第 ${segment.index}/${segment.total} 段。来源页 slug 用 ${segment.slug}。${segment.alias ? `aliases 必须包含「${segment.alias}」。` : ''}只写这一段里有的事实。`
     : ''
   return [
-    { role: 'system', content: `${schema}\n只返回一个 JSON 对象。图像里的数字和文字也要写进页面。每页必须有 summary，sources 必须包含给出的 hash。每页带 aliases（读者以后会拿来查找的词，包括正文没写但读者会用的常见叫法，最多 8 个，没有把握就少写）和 claims（原子主张，最多 8 条）。事件写成 event 页。relations 每条写成「谓语 目标页」，谓语用小写连字符，例如 works-for entity/acme。更新已有页时，原来的 aliases、claims 和 relations 必须保留。${segmentRule}` },
+    { role: 'system', content: `${schema}\n只返回一个 JSON 对象。图像里的数字和文字也要写进页面。kind 必填，只能是 source、entity、event、concept。每页必须有 summary，sources 必须包含给出的 hash。每页带 aliases（读者以后会拿来查找的词，包括正文没写但读者会用的常见叫法，最多 8 个，没有把握就少写）和 claims（原子主张，最多 8 条）。事件写成 event 页。contradicts 每项必须是种类/slug，不能写句子。relations 每条写成「谓语 目标页」，谓语用小写连字符，例如 works-for entity/acme。${pageList(catalog)}更新已有页时写 update:true，原来的 aliases、claims 和 relations 必须保留。${segmentRule}` },
     { role: 'user', content: withImages(payload, presented.images) },
   ]
+}
+
+/** 把已有页面的 slug、标题和别名写进提示，要求复用，不要按标题另起 slug。 */
+function pageList(catalog) {
+  const lines = (catalog?.entries ?? []).slice(0, 40).map((entry) => {
+    const alias = (entry.aliases ?? []).filter((item) => typeof item === 'string' && item.trim()).slice(0, 4).join('、')
+    return `- ${entry.id} ${entry.title || ''}${alias ? ` 别名：${alias}` : ''}`
+  })
+  if (lines.length === 0) return '当前没有已有页面。新建页自己取合法 slug。'
+  const more = catalog.truncated ? '\n目录还有更多页，以 catalog 为准。' : ''
+  return `已有页面必须复用这些 slug，不要按标题或别名另起一个：\n${lines.join('\n')}${more}\n`
 }
 
 /**

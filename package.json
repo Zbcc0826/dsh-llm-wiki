@@ -1,6 +1,6 @@
 {
   "name": "dsh-llm-wiki",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "从 Karpathy 在 GitHub 发布的 LLM Wiki 说明出发实现。欢迎试用，也欢迎让自己的 agent 参与。",
   "type": "module",
   "private": true,
