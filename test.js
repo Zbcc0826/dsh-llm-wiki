@@ -456,10 +456,68 @@ test('同一实体按标题或别名复用已有 slug，句子型矛盾改写成
   assert.match(prompt, /entity\/xingqiao-tech/)
   assert.match(prompt, /必须复用/)
   assert.match(prompt, /contradicts 每项必须是种类\/slug/)
+  assert.match(prompt, /claims ≤ 8/)
+  assert.match(prompt, /summary ≤ 200/)
+  assert.match(prompt, /body ≤ 8000/)
   const stored = readPages(root).pages.find((page) => page.kind === 'entity')
   assert.equal(stored.slug, 'xingqiao-tech')
   assert.equal(stored.sources.length, 2)
   assert.equal(readPages(root).pages.some((page) => page.slug === 'xing-qiao-ke-ji'), false)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('claims 超过 8 条时截到 8 条，修复重试能看见上一份原文', async () => {
+  const hash = 'c'.repeat(64)
+  const claims = Array.from({ length: 9 }, (_item, index) => `主张${index}`)
+  const checked = validateIngest({
+    summary: '补材料',
+    pages: [{
+      kind: 'entity',
+      slug: 'northwind',
+      title: 'Northwind',
+      summary: '甲'.repeat(250),
+      body: '正文',
+      aliases: Array.from({ length: 9 }, (_item, index) => `alias-${index}`),
+      claims,
+      sources: [hash],
+    }],
+  }, { hash, existing: new Map() })
+  assert.equal(checked.ok, true, JSON.stringify(checked))
+  assert.equal(checked.pages[0].claims.length, 8)
+  assert.equal(checked.pages[0].aliases.length, 8)
+  assert.equal(checked.pages[0].summary.length <= 200, true)
+  assert.equal(checked.pages[0].claims.includes('主张8'), false)
+
+  const root = tempWiki()
+  let repair = ''
+  const saved = await ingest({
+    root,
+    input: { text: 'Northwind 有很多主张。', title: 'Northwind' },
+    now: () => new Date('2026-11-26T00:00:00.000Z'),
+    approve: async () => 'allowed-once',
+    complete: async (messages) => {
+      const sourceHash = JSON.parse(messages.find((item) => item.role === 'user').content).hash
+      if (!repair) {
+        repair = 'pending'
+        return {
+          ok: true,
+          model: 'deepseek-flash',
+          text: JSON.stringify({ summary: '缺摘要', pages: [{ kind: 'entity', slug: 'northwind', title: 'Northwind', summary: '', body: '正文', sources: [sourceHash] }] }),
+        }
+      }
+      repair = messages.at(-1).content
+      const prior = messages.find((item) => item.role === 'assistant')?.content ?? ''
+      assert.match(prior, /缺摘要/)
+      return {
+        ok: true,
+        model: 'deepseek-flash',
+        text: JSON.stringify({ summary: '补上', pages: [{ kind: 'entity', slug: 'northwind', title: 'Northwind', summary: '物流公司', body: '正文', sources: [sourceHash] }] }),
+      }
+    },
+  })
+  assert.equal(saved.ok, true, JSON.stringify(saved))
+  assert.match(repair, /field=summary/)
+  assert.match(repair, /rule=1到200字/)
   rmSync(root, { recursive: true, force: true })
 })
 

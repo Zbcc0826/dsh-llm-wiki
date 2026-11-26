@@ -155,7 +155,7 @@ async function draftPatch(options, messages, hash, existing, prepare) {
   )
   let checked = check(drafted.value)
   if (!checked.ok && checked.code === 'BAD_PATCH') {
-    drafted = await askModel(options.complete, repairMessages(messages, checked, hash))
+    drafted = await askModel(options.complete, repairMessages(messages, checked, hash, drafted.text))
     if (!drafted.ok) return drafted
     checked = check(drafted.value)
   }
@@ -380,11 +380,11 @@ async function askModel(complete, messages) {
   const result = await complete(messages)
   if (!result?.ok) return result ?? { ok: false, code: 'NO_MODEL' }
   const value = extractJson(result.text)
+  const text = String(result.text ?? '')
   if (!value) {
-    const text = String(result.text ?? '').slice(0, 180)
-    return { ok: false, code: 'BAD_PATCH', field: 'json', value: text, rule: '一个 JSON 对象', message: text }
+    return { ok: false, code: 'BAD_PATCH', field: 'json', value: text.slice(0, 180), rule: '一个 JSON 对象', message: text.slice(0, 180), text }
   }
-  return { ok: true, value, model: result.model }
+  return { ok: true, value, text, model: result.model }
 }
 
 async function gate(approve, copy) {
@@ -470,18 +470,24 @@ function readSchema(root) {
   return text
 }
 
-/** 第一次补丁缺字段时，把缺什么和必须带上的哈希再交给模型一次。 */
-function repairMessages(messages, reason, hash) {
+/** 写进系统提示和修复提示，避免模型不知道条数上限。 */
+const FIELD_LIMITS = '硬限制：kind 必填，只能是 source、entity、event、concept。aliases ≤ 8，每条 ≤ 40 字。claims ≤ 8，每条 ≤ 160 字。summary ≤ 200 字。body ≤ 8000 字。sources 必须包含给出的 hash。多出来的 aliases、claims，以及过长的 summary、body，会截掉末尾，不会因此整份失败。'
+
+/** 第一次补丁缺字段时，把字段、非法值、规则和上一份原文再交给模型一次。 */
+function repairMessages(messages, reason, hash, previousText = '') {
   const detail = reason && typeof reason === 'object'
-    ? `${reason.field ?? reason.message ?? 'BAD_PATCH'}=${reason.value ?? ''} rule=${reason.rule ?? ''}`
+    ? `field=${reason.field ?? reason.message ?? 'BAD_PATCH'} value=${reason.value ?? ''} rule=${reason.rule ?? ''}`
     : String(reason || 'BAD_PATCH')
-  return [
+  const prior = String(previousText ?? '').trim()
+  const reminder = [
     ...messages,
+    ...(prior ? [{ role: 'assistant', content: prior.slice(0, 4000) }] : []),
     {
       role: 'user',
-      content: `上一份补丁不合格：${detail}。kind 必填，只能是 source、entity、event、concept。每页必须有 summary（1到200字）和 body。sources 必须包含 ${hash}。contradicts 每项必须是种类/slug，不能写句子。relations 每条写成「谓语 目标页」。已有页面必须复用目录里的 slug，并写 update:true。slug 必须匹配 ^[a-z0-9]+(?:-[a-z0-9]+)*$。不要写 query 页。只返回一个 JSON 对象。`,
+      content: `上一份补丁不合格：${detail}。请按这个字段改，不要原样再交。${FIELD_LIMITS}contradicts 每项必须是种类/slug，不能写句子。relations 每条写成「谓语 目标页」。已有页面必须复用目录里的 slug，并写 update:true。sources 必须包含 ${hash}。slug 必须匹配 ^[a-z0-9]+(?:-[a-z0-9]+)*$。不要写 query 页。只返回一个 JSON 对象。`,
     },
   ]
+  return reminder
 }
 
 function ingestMessages({ schema, catalog, presented, hash, title, segment }) {
@@ -499,7 +505,7 @@ function ingestMessages({ schema, catalog, presented, hash, title, segment }) {
     ? `这是同一份材料的第 ${segment.index}/${segment.total} 段。来源页 slug 用 ${segment.slug}。${segment.alias ? `aliases 必须包含「${segment.alias}」。` : ''}只写这一段里有的事实。`
     : ''
   return [
-    { role: 'system', content: `${schema}\n只返回一个 JSON 对象。图像里的数字和文字也要写进页面。kind 必填，只能是 source、entity、event、concept。每页必须有 summary，sources 必须包含给出的 hash。每页带 aliases（读者以后会拿来查找的词，包括正文没写但读者会用的常见叫法，最多 8 个，没有把握就少写）和 claims（原子主张，最多 8 条）。事件写成 event 页。contradicts 每项必须是种类/slug，不能写句子。relations 每条写成「谓语 目标页」，谓语用小写连字符，例如 works-for entity/acme。${pageList(catalog)}更新已有页时写 update:true，原来的 aliases、claims 和 relations 必须保留。${segmentRule}` },
+    { role: 'system', content: `${schema}\n只返回一个 JSON 对象。图像里的数字和文字也要写进页面。${FIELD_LIMITS}每页带 aliases（读者以后会拿来查找的词，包括正文没写但读者会用的常见叫法，没有把握就少写）和 claims（原子主张）。事件写成 event 页。contradicts 每项必须是种类/slug，不能写句子。relations 每条写成「谓语 目标页」，谓语用小写连字符，例如 works-for entity/acme。${pageList(catalog)}更新已有页时写 update:true，原来的 aliases、claims 和 relations 必须保留。${segmentRule}` },
     { role: 'user', content: withImages(payload, presented.images) },
   ]
 }

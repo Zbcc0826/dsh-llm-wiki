@@ -143,18 +143,18 @@ function checkPage(page, seen = new Set(), context = {}) {
     ? aligned.slug
     : uniqueSlug(aligned.kind, resolveSlug(page.slug, aligned.title), seen)
   if (!slug) return badPatch('slug', page.slug, SLUG_RULE)
-  page = { ...aligned, slug }
+  page = { ...aligned, slug, summary: clipText(page.summary, 200), body: clipText(page.body, 8000) }
   if (typeof page.title !== 'string' || page.title.length < 1 || page.title.length > 120) return badPatch('title', page.title, '1到120字')
-  if (typeof page.summary !== 'string' || page.summary.length < 1 || page.summary.length > 200) return badPatch('summary', page.summary, '1到200字')
-  if (typeof page.body !== 'string' || page.body.length < 1 || page.body.length > 8000) return badPatch('body', page.body, '1到8000字')
+  if (!page.summary) return badPatch('summary', page.summary, '1到200字')
+  if (!page.body) return badPatch('body', page.body, '1到8000字')
   const body = context.index ? page.body : rewriteBody(page.body, context)
   const contradicts = context.index ? plainStrings(page.contradicts, 'contradicts') : resolveRefs(page.contradicts, context, 'contradicts')
   if (contradicts.code) return contradicts
   const cites = context.index ? plainStrings(page.cites, 'cites') : resolveRefs(page.cites, context, 'cites')
   if (cites.code) return cites
-  const aliases = textList(page.aliases, 8, 40, 'aliases')
+  const aliases = textList(page.aliases, 8, 40, 'aliases', true)
   if (aliases.code) return aliases
-  const claims = textList(page.claims, 8, 160, 'claims')
+  const claims = textList(page.claims, 8, 160, 'claims', true)
   if (claims.code) return claims
   const relations = context.index ? plainStrings(page.relations, 'relations', 16) : relationList(page, slug, context)
   if (relations.code) return relations
@@ -202,20 +202,36 @@ function unique(value) {
   return [...new Set(value.filter((item) => typeof item === 'string'))]
 }
 
-/** 短索引项。空缺当作没有，超长或不是字符串则拒绝。 */
-function textList(value, maxItems, maxLen, code) {
+/** 短索引项。空缺当作没有。clip 时超长截断、超条数丢掉末尾，不再整份失败。 */
+function textList(value, maxItems, maxLen, code, clip = false) {
   if (value == null) return []
   if (!Array.isArray(value)) return badPatch(code, '', `字符串数组，最多 ${maxItems} 项，每项不超过 ${maxLen} 字`)
   const items = []
   for (const item of value) {
     if (typeof item !== 'string') return badPatch(code, item, `字符串，不超过 ${maxLen} 字`)
-    const text = item.trim()
-    if (!text || text.length > maxLen || /[\n\r]/.test(text)) return badPatch(code, text, `1到${maxLen}字，不能换行`)
+    let text = item.trim()
+    if (!text) continue
+    if (/[\n\r]/.test(text)) return badPatch(code, text, `1到${maxLen}字，不能换行`)
+    if (text.length > maxLen) {
+      if (!clip) return badPatch(code, text, `1到${maxLen}字，不能换行`)
+      text = text.slice(0, maxLen).trim()
+      if (!text) continue
+    }
     items.push(text)
   }
   const deduped = [...new Set(items)]
-  if (deduped.length > maxItems) return badPatch(code, String(deduped.length), `最多 ${maxItems} 项`)
+  if (deduped.length > maxItems) {
+    if (!clip) return badPatch(code, String(deduped.length), `最多 ${maxItems} 项`)
+    return deduped.slice(0, maxItems)
+  }
   return deduped
+}
+
+/** 摘要和正文过长时截到上限。不是字符串就留空，交给后面的字段检查。 */
+function clipText(value, max) {
+  if (typeof value !== 'string') return ''
+  const text = value.trim()
+  return text.length > max ? text.slice(0, max).trim() : text
 }
 
 /** 标题或别名对上已有页时，改用那一页的种类和 slug，不再另起一个。 */
