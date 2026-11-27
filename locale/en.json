@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "LLM Wiki",
-    "description": "Built from Karpathy's LLM Wiki gist. Try it, and let your own agent take part."
+    "description": "DeepSeek Harness knowledge wiki plugin built from Andrej Karpathy's LLM Wiki gist: raw sources stay unchanged in raw/, and pages update only from patches after approval. Try it, and let your own agent take part."
   }
 }

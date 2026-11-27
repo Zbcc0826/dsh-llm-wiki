@@ -1,9 +1,20 @@
 {
   "name": "dsh-llm-wiki",
   "version": "0.4.3",
-  "description": "从 Karpathy 在 GitHub 发布的 LLM Wiki 说明出发实现。欢迎试用，也欢迎让自己的 agent 参与。",
+  "description": "基于 Andrej Karpathy 的 LLM Wiki 说明实现的 DeepSeek Harness 知识维基插件（不发布到 npm）。欢迎试用，也欢迎让自己的 agent 参与。",
   "type": "module",
   "private": true,
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh-bundle",
+    "llm-wiki"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Zbcc0826/dsh-llm-wiki.git"
+  },
+  "homepage": "https://github.com/Zbcc0826/dsh-llm-wiki",
   "icon": "./icon.svg",
   "main": "./index.js",
   "exports": {
@@ -46,7 +57,7 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.3"
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.3 <0.2.3 || >=0.2.3-0 <0.2.4-0 || >=0.2.4-0 <0.2.5-0 || >=0.2.5-0 <0.2.6-0 || >=0.2.6-0 <0.2.7-0 || >=0.2.7-0 <0.2.8-0 || >=0.2.8-0 <0.2.9-0 || >=0.2.9-0 <0.3.0-0"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.2",

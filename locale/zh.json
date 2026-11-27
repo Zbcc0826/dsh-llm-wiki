@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "LLM Wiki",
-    "description": "从 Karpathy 在 GitHub 发布的 LLM Wiki 说明出发实现。欢迎试用，也欢迎让自己的 agent 参与。"
+    "description": "基于 Andrej Karpathy 的 LLM Wiki 说明实现的 DeepSeek Harness 知识维基插件：原料存入 raw/ 后不再改，页面只在批准后按补丁更新。欢迎试用，也欢迎让自己的 agent 参与。"
   }
 }
