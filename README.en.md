@@ -6,6 +6,57 @@ Try it, and let your own agent take part: ingest sources, ask questions, improve
 
 This is a local plugin and is not published to npm. Clone the repo and run the install script on your machine. The desktop app and the CLI share one configuration. The package name is `dsh-llm-wiki`.
 
+[![test](https://github.com/Zbcc0826/dsh-llm-wiki/actions/workflows/test.yml/badge.svg)](https://github.com/Zbcc0826/dsh-llm-wiki/actions/workflows/test.yml)
+
+## What the wiki directory looks like
+
+By default the wiki lives at `$DSH_HOME/llm-wiki` (or at the path set in `LLM_WIKI_ROOT`):
+
+```text
+llm-wiki/
+├── raw/
+│   ├── <64-char-hex-hash><original-ext>  # raw bytes, never rewritten; .bin if the extension is not safe
+│   └── <same-hash>.meta.json
+├── pages/
+│   ├── source/<slug>.md
+│   ├── entity/<slug>.md
+│   ├── event/<slug>.md
+│   ├── concept/<slug>.md
+│   └── query/<slug>.md
+├── index.md
+├── contradictions.md
+├── log.md
+└── schema.md                          # generated once, never overwritten
+```
+
+## What one page looks like
+
+Below is a short sample `entity` page (for example `pages/entity/chen-lin.md`), written in the exact `serializePage` format from `pages.js`, where YAML frontmatter strings and list entries are serialized as JSON strings:
+
+```markdown
+---
+kind: "entity"
+slug: "chen-lin"
+title: "Lin Chen"
+summary: "Systems engineer at Acme working on the storage engine."
+partial: false
+updated: "2026-04-12T08:30:00.000Z"
+sources:
+  - "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+cites:
+  - "source/acme-team-notes"
+contradicts: []
+relations:
+  - "works-for entity/acme"
+aliases:
+  - "L. Chen"
+claims:
+  - "Lin Chen maintains the storage engine at Acme."
+---
+
+Lin Chen has worked as a systems engineer at [[entity/acme]] since 2024, maintaining the storage engine.
+```
+
 ## Requirements
 
 - DeepSeek Harness `0.2.2-rc.3` or newer, and below `0.3.0`
@@ -39,13 +90,22 @@ Sources land in `raw/` and stay unchanged. Pages live in `pages/`. The plugin wr
 
 A question starts at the catalog cards: title, aliases, and one claim. An alias match outranks a passing mention in a body. The plugin then opens a few pages, follows one `[[link]]`, and keeps the other side of a contradiction. When the question and the page share no words, local multilingual-e5-small vectors fill the gap. When neither the catalog nor the words pull ahead, it tries headings a reader would look up. Reranking sees the evidence sentence, not the start of the page. At most ten pieces of evidence are returned, and the answer has to come from those pieces.
 
-- `wiki_ingest` parses one source and updates the pages that should mention it. Pass either a path or text, not both. Nothing is written before approval. Aliases are the words a later reader would search. Text longer than one page is split on headings and tables. Every part keeps the same raw hash and the same index heading, and a table stays with its header. At most 8 parts are filed; the index page marks anything left unread.
+- `wiki_ingest` parses one source and updates the pages that should mention it. Its only parameters are `path`, `text`, `title`, `mediaType`, `parsed`, and `llm` (pass one of `path`, `text`, or `parsed`). Nothing is written before approval. Aliases are the words a later reader would search. Text longer than one page is split on headings and tables. Every part keeps the same raw hash and the same index heading, and a table stays with its header. At most 8 parts are filed; the index page marks anything left unread.
 - `wiki_query` retrieves evidence, then answers. It does not read raw files. The answer is filed only when `file` is true. Retrieval also follows `relations`.
 - `wiki_graph` walks entity, event, and relation edges without a model. `hops` is 0 to 4. `predicate` keeps one relation type.
 - `wiki_lint` reports broken links, orphan pages, missing relations, and incomplete sources. `apply` edits existing pages only. It cannot create a page or drop a source.
 - `wiki_read`, `wiki_status`, and `wiki_parsers` are read-only.
 
 If there is no approval UI, a write returns `NOT_APPROVED` and does not hang.
+
+### Handling the tail after 8 segments
+
+`wiki_ingest` only accepts `path`, `text`, `title`, `mediaType`, `parsed`, and `llm`—there is no parameter to resume or continue from segment 9. In `split.js`, `MAX_SEGMENTS = 8` with roughly 7500 characters per segment, and the excess character count is recorded in `omitted`:
+
+- The source index page sets `partial: true`, adds `后面还有未纳入的文字` to `summary`, and writes `后面约 N 字这一次没有纳入。` in its body.
+- `wiki_lint` reports `code: PARTIAL` for pages with `partial: true`. Running with `apply: true` only modifies existing pages and will not pull in the unread tail.
+- Calling `wiki_ingest` again on the same full text still starts from the beginning and only expands the first 8 segments.
+- To ingest the remaining tail, extract the unread portion into a separate new source (a new `path` or `text`) and call `wiki_ingest` on it. The new source gets its own raw hash, and its pages can link to or update pages already in the wiki.
 
 ## Parsers
 

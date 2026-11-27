@@ -10,6 +10,57 @@ DeepSeek Harness plugin built from [Andrej Karpathy's LLM Wiki gist](https://gis
 
 这是一个本地插件，不需要发布到 npm。克隆后在你自己的机器上运行安装脚本即可。桌面应用和命令行共用一份配置。包名是 `dsh-llm-wiki`。
 
+[![test](https://github.com/Zbcc0826/dsh-llm-wiki/actions/workflows/test.yml/badge.svg)](https://github.com/Zbcc0826/dsh-llm-wiki/actions/workflows/test.yml)
+
+## 目录长什么样
+
+维基默认存放在 `$DSH_HOME/llm-wiki`（也可以通过环境变量 `LLM_WIKI_ROOT` 指定目录）：
+
+```text
+llm-wiki/
+├── raw/
+│   ├── <64位十六进制哈希><原扩展名>    # 原料字节，写入后不再改；扩展名不合法时用 .bin
+│   └── <同一哈希>.meta.json
+├── pages/
+│   ├── source/<slug>.md
+│   ├── entity/<slug>.md
+│   ├── event/<slug>.md
+│   ├── concept/<slug>.md
+│   └── query/<slug>.md
+├── index.md
+├── contradictions.md
+├── log.md
+└── schema.md                          # 第一次生成后不再覆盖
+```
+
+## 一页长什么样
+
+下面是一份典型的 `entity` 页（例如 `pages/entity/chen-lin.md`），遵循 `pages.js` 中 `serializePage` 的格式，YAML frontmatter 中的字符串和列表项均按 JSON 字符串序列化：
+
+```markdown
+---
+kind: "entity"
+slug: "chen-lin"
+title: "陈林"
+summary: "Acme 公司的系统工程师，负责存储引擎。"
+partial: false
+updated: "2026-04-12T08:30:00.000Z"
+sources:
+  - "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+cites:
+  - "source/acme-team-notes"
+contradicts: []
+relations:
+  - "works-for entity/acme"
+aliases:
+  - "陈工"
+claims:
+  - "陈林在 Acme 负责存储引擎。"
+---
+
+陈林自 2024 年起在 [[entity/acme]] 担任系统工程师，负责存储引擎维护。
+```
+
 ## 环境
 
 - DeepSeek Harness `0.2.2-rc.3` 或更高，且低于 `0.3.0`
@@ -43,13 +94,22 @@ node install.mjs
 
 提问时先看目录卡片：标题、别名、一句主张。别名对上了，就比正文里顺带出现的同一个词更靠前。然后打开少数几页，顺着 `[[链接]]` 再看一页，并留下矛盾的另一面。没有共同词时，用本地的 multilingual-e5-small 向量补一档；词面和目录都拉不开时，再换一组读者会去查的词条名。证据句用来重排，不从页首硬读。最多返回 10 条证据，然后只根据这些证据作答。
 
-- `wiki_ingest`：解析一份材料并更新相关页面。路径和文本只能给一个。批准后才写。别名写成读者以后会拿来查找的词。超过一页的材料按章节和表格切开，各段共用同一份原料和同一条索引头；表格不和表头拆开。一次最多展开 8 段，后面没读到的字只标在目录页上。
+- `wiki_ingest`：解析一份材料并更新相关页面。参数只有 `path`、`text`、`title`、`mediaType`、`parsed` 和 `llm`（其中 `path`、`text`、`parsed` 三选一）。批准后才写。别名写成读者以后会拿来查找的词。超过一页的材料按章节和表格切开，各段共用同一份原料和同一条索引头；表格不和表头拆开。一次最多展开 8 段，后面没读到的字只标在目录页上。
 - `wiki_query`：先取证再回答。不读取原料。`file` 为 true 才把答案留下。取证会顺着 relations 再走一跳。
 - `wiki_graph`：从实体、事件或别名出发沿关系查询。不调用模型。`hops` 为 0 到 4，`predicate` 可只走一种谓语。
 - `wiki_lint`：报告断链、孤立页、断掉的关系和不完整材料。`apply` 为 true 才改已有页面，不新建，也不删除依据。
 - `wiki_read` / `wiki_status` / `wiki_parsers`：只读。
 
 没有审批界面时，写入返回 `NOT_APPROVED`，不挂起。
+
+### 超过 8 段怎么处理尾巴
+
+`wiki_ingest` 只有 `path`、`text`、`title`、`mediaType`、`parsed`、`llm` 这几个参数，没有续读或「从第 9 段继续」的参数。在 `split.js` 中，`MAX_SEGMENTS = 8`，每段大约 7500 字，超出部分的字符数记在返回的 `omitted` 中：
+
+- 目录页（source 索引页）的 `summary` 会写「后面还有未纳入的文字」，正文会写「后面约 N 字这一次没有纳入。」，且页面标记为 `partial: true`。
+- `wiki_lint` 会对 `partial: true` 的页报告 `code: PARTIAL`；即使传入 `apply: true`，也只会修改已有页面，不会把没读过的尾巴补进来。
+- 用同一份全文再次调用 `wiki_ingest`，仍然会从头只展开前 8 段，不会接着往后读。
+- 要把剩余尾巴纳入维基，只能把未读部分单独做成一份新材料（传新的 `path` 或 `text`）再调用 `wiki_ingest`。新材料会有自己的原料哈希，生成的页面可以引用或更新维基里已经写好的页。
 
 ## 解析
 
